@@ -61,6 +61,7 @@ def parse_and_filter(raw_objects: list[dict[str, Any]], ts) -> list[dict[str, An
                     "inclination_deg": round(_f(sat.model.inclo) * 57.29577951308232, 4),
                     "latitude": round(_f(subpoint.latitude.degrees), 4),
                     "longitude": round(_f(subpoint.longitude.degrees), 4),
+                    "bstar": float(obj.get("BSTAR", 0.0) or 0.0),
                 })
         except Exception:
             # Skip malformed/decayed objects rather than crash the whole fetch
