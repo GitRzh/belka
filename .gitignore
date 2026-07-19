@@ -33,4 +33,7 @@ build/
 
 # Jupyter (if used for testing/prototyping)
 .ipynb_checkpoints/
+
 debris_cache.json
+
+app/test_pipeline_live.py
