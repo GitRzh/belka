@@ -35,7 +35,19 @@ DEBRIS_GROUPS = ["cosmos-2251-debris", "iridium-33-debris", "fengyun-1c-debris"]
 
 ALT_MIN_KM = 700
 ALT_MAX_KM = 1000
-MAX_OBJECTS = 300  # cap for hackathon performance
+MAX_OBJECTS = 300  # total cap for hackathon performance, split evenly per group below
+
+# BUG FOUND VIA LIVE TESTING (confirmed against real Celestrak data): capping
+# the *combined* list to MAX_OBJECTS after concatenating all groups means
+# whichever group is fetched first eats the whole cap if it's big enough on
+# its own. Real-world check: cosmos-2251-debris alone has 300+ real fragments
+# in the 700-1000km band, so with DEBRIS_GROUPS fetched in listed order,
+# iridium-33-debris and fengyun-1c-debris NEVER made it into the result at
+# all -- confirmed via `Counter(o['name'].split()[0] for o in cache)` coming
+# back 100% COSMOS. Fix: filter and cap each group independently, then
+# combine, so every debris cloud gets guaranteed shelf space regardless of
+# fetch order or relative size.
+PER_GROUP_MAX_OBJECTS = MAX_OBJECTS // len(DEBRIS_GROUPS)
 
 # Celestrak only refreshes GP data server-side every ~2 hours, and blocks IPs
 # that poll more often than that. Cache to a local file so repeated dev/test
@@ -92,14 +104,14 @@ def get_debris_field(force_refresh: bool = False) -> list[dict[str, Any]]:
             return cached
 
     ts = load.timescale()
-    all_objects: list[dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
 
     for group in DEBRIS_GROUPS:
         raw = fetch_group_tles(group)
-        all_objects.extend(raw)
-
-    filtered = parse_and_filter(all_objects, ts)
-    result = filtered[:MAX_OBJECTS]
+        filtered_group = parse_and_filter(raw, ts)
+        capped_group = filtered_group[:PER_GROUP_MAX_OBJECTS]
+        result.extend(capped_group)
+        print(f"[fetch] {group}: {len(filtered_group)} in band, kept {len(capped_group)} (cap={PER_GROUP_MAX_OBJECTS})")
 
     with open(CACHE_FILE, "w") as f:
         json.dump(result, f)
