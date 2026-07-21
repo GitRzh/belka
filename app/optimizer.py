@@ -126,28 +126,47 @@ def optimize_route(
         index = solution.Value(routing.NextVar(index))
 
     visited_objects = [pool[i] for i in visited_pool_indices]
-    visited_names = {o["name"] for o in visited_objects}
-    skipped_objects = [o for o in pool if o["name"] not in visited_names]
+    # NOTE: was previously computed via name-set difference, which silently
+    # mis-reported skipped objects whenever two pool objects shared a "name"
+    # (common in real data -- many debris fragments are all named e.g.
+    # "COSMOS 2251 DEB", disambiguated only by norad_id). Index-based
+    # difference is the correct identity check.
+    visited_index_set = set(visited_pool_indices)
+    skipped_objects = [obj for i, obj in enumerate(pool) if i not in visited_index_set]
+
+    def _label(obj: dict[str, Any]) -> str:
+        """Display label. Real debris fragments frequently share the same
+        "name" field -- norad_id is the only unique identifier, so it's
+        appended for anything that isn't the depot (norad_id -1, always
+        unique/singular, no collision risk)."""
+        if obj["norad_id"] == -1:
+            return obj["name"]
+        return f"{obj['name']} ({obj['norad_id']})"
 
     # Per-step breakdown, walking depot -> visited nodes in solved order.
+    # Uses node indices directly (already known from visited_pool_indices)
+    # rather than nodes.index(obj) -- list.index() on dicts does a value
+    # equality scan, which isn't a safe identity check if two objects ever
+    # have identical field values.
     step_breakdown: list[dict[str, Any]] = []
     total_fuel = 0.0
-    prev = depot
-    for obj in visited_objects:
-        result_matrix_lookup = matrix[nodes.index(prev)][nodes.index(obj)]
+    prev_node_index = 0  # depot is always node 0
+    for pool_i in visited_pool_indices:
+        node_index = pool_i + 1
+        result_matrix_lookup = matrix[prev_node_index][node_index]
         step_breakdown.append({
-            "from": prev["name"],
-            "to": obj["name"],
+            "from": _label(nodes[prev_node_index]),
+            "to": _label(nodes[node_index]),
             "delta_v_km_s": round(result_matrix_lookup, 4),
         })
         total_fuel += result_matrix_lookup
-        prev = obj
+        prev_node_index = node_index
 
     return {
-        "route": [o["name"] for o in visited_objects],
+        "route": [_label(o) for o in visited_objects],
         "visited_count": len(visited_objects),
         "skipped_count": len(skipped_objects),
-        "skipped_names": [o["name"] for o in skipped_objects],
+        "skipped_names": [_label(o) for o in skipped_objects],
         "total_fuel_cost_km_s": round(total_fuel, 4),
         "fuel_budget_km_s": fuel_budget_km_s,
         "fuel_used_fraction": round(total_fuel / fuel_budget_km_s, 4) if fuel_budget_km_s > 0 else 0.0,
