@@ -15,15 +15,25 @@ Pipeline for /plan:
                                for_ortools directly -- optimizer.py already
                                owns that.
 """
+import json
+import logging
+import os
+import re
 from typing import Any, Optional
 
+import groq as groq_module
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+load_dotenv()
 
 from app.tle_fetch import get_debris_field
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE
 from app.optimizer import optimize_route, RISK_PENALTY_SCALE
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Orbital-Clean API")
 
@@ -45,6 +55,10 @@ class PlanRequest(BaseModel):
     weights: Optional[dict[str, float]] = Field(None, description="Override risk_score.py DEFAULT_WEIGHTS, e.g. {'proximity': 0.8, 'lifetime': 0.2}")
 
 
+class ReplanRequest(PlanRequest):
+    user_request_text: str = Field(..., description="Plain-English override instructions, e.g. 'use only 1.5 km/s of fuel'")
+
+
 @app.get("/debris-field")
 def debris_field(force_refresh: bool = False):
     """Full scored, risk-ranked debris list (riskiest first)."""
@@ -61,9 +75,9 @@ def debris_detail(norad_id: int):
     return match
 
 
-@app.post("/plan")
-def plan(req: PlanRequest):
-    """Risk-ranked pool -> orienteering optimizer -> route + reasoning-ready breakdown."""
+def _run_plan(req: PlanRequest) -> dict[str, Any]:
+    """Execute the full plan pipeline for a PlanRequest and return the result dict.
+    Shared by /plan and /replan so both endpoints stay in sync."""
     scored = _get_scored_field(weights=req.weights)
     if not scored:
         raise HTTPException(status_code=502, detail="Debris field empty -- Celestrak fetch may have failed")
@@ -83,6 +97,263 @@ def plan(req: PlanRequest):
 
     result["pool_size_used"] = len(pool)
     return result
+
+
+@app.post("/plan")
+def plan(req: PlanRequest):
+    """Risk-ranked pool -> orienteering optimizer -> route + reasoning-ready breakdown."""
+    return _run_plan(req)
+
+
+# ---------------------------------------------------------------------------
+# /replan helpers
+# ---------------------------------------------------------------------------
+
+# groq==0.11.0 supports response_format={"type": "json_object"} only (no
+# json_schema mode). The JSON schema is described in the system prompt instead.
+_GROQ_TIMEOUT = 20.0
+_ALLOWED_OVERRIDE_KEYS = {"fuel_budget_km_s", "risk_penalty_scale", "weights", "no_changes"}
+
+def _build_parse_prompt(req: "PlanRequest") -> str:
+    """Build the system prompt with current parameter values embedded so the
+    model can resolve relative instructions like 'cut in half' or 'double it'."""
+    base_weights = req.weights or DEFAULT_WEIGHTS
+    return (
+        "You are a parameter-extraction assistant for an orbital debris removal mission planner. "
+        "The mission currently has these parameter values:\n"
+        f"  fuel_budget_km_s   = {req.fuel_budget_km_s}  (also called: fuel budget, delta-v budget, fuel limit)\n"
+        f"  risk_penalty_scale = {req.risk_penalty_scale}  (also called: risk penalty, risk weight, risk aggressiveness)\n"
+        f"  weights.proximity  = {base_weights.get('proximity', DEFAULT_WEIGHTS['proximity'])}  (also called: proximity weight, congestion weight)\n"
+        f"  weights.lifetime   = {base_weights.get('lifetime',  DEFAULT_WEIGHTS['lifetime'])}  (also called: lifetime weight, drag weight)\n"
+        "\n"
+        "From the user's message, extract ONLY the parameters they want to change and output a single valid JSON object. "
+        "The only keys you may emit are:\n"
+        "  fuel_budget_km_s   -- positive float (km/s)\n"
+        "  risk_penalty_scale -- non-negative float\n"
+        "  weights            -- object with keys 'proximity' (float 0-1) and/or 'lifetime' (float 0-1)\n"
+        "\n"
+        "Rules:\n"
+        "- Resolve relative instructions using the current values shown above "
+        "(e.g. 'cut in half' -> divide the current value by 2; 'double it' -> multiply by 2; "
+        "'reduce by 20%' -> multiply by 0.8).\n"
+        "- Omit any key the user did not mention.\n"
+        "- If the message contains no recognisable parameter change at all, return exactly {\"no_changes\": true}.\n"
+        "- Output ONLY the JSON object -- no prose, no markdown."
+    )
+
+
+def _groq_client() -> groq_module.Groq:
+    """Construct a Groq client from the environment. GROQ_API_KEY is loaded
+    from .env by load_dotenv() at module import time."""
+    return groq_module.Groq(
+        api_key=os.environ.get("GROQ_API_KEY"),
+        timeout=_GROQ_TIMEOUT,
+    )
+
+
+def _parse_overrides(user_text: str, req: "PlanRequest") -> dict[str, Any]:
+    """Call openai/gpt-oss-20b in json_object mode to extract parameter overrides.
+    Retries once on malformed JSON, then raises ValueError."""
+    client = _groq_client()
+    system_prompt = _build_parse_prompt(req)
+    last_raw = ""
+    for attempt in range(2):
+        try:
+            resp = client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_text},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+            )
+            last_raw = resp.choices[0].message.content or ""
+            logger.debug("[_parse_overrides] raw LLM response: %r", last_raw)
+            raw = json.loads(last_raw)
+            return {k: v for k, v in raw.items() if k in _ALLOWED_OVERRIDE_KEYS}
+        except json.JSONDecodeError:
+            if attempt == 1:
+                raise ValueError(
+                    f"LLM returned malformed JSON after retry. Raw response: {last_raw!r}"
+                )
+            # first attempt failed -- retry once
+        except (groq_module.APIConnectionError, groq_module.RateLimitError) as exc:
+            # APIConnectionError is the base of APITimeoutError — catches both
+            # a clean timeout and cases where the connection is refused/reset
+            # before the timeout fires (e.g. absurdly low timeout values).
+            raise HTTPException(
+                status_code=503,
+                detail=f"Groq API unavailable (timeout or connection error): {exc}",
+            ) from exc
+    return {}  # unreachable; satisfies type-checker
+
+
+def _explain_diff(diff: dict[str, Any]) -> str:
+    """Call openai/gpt-oss-120b with ONLY the diff dict to generate a
+    2-3 sentence plain-language explanation. Raw route data is never passed."""
+    prompt = (
+        "You are a mission-briefing assistant for an orbital debris removal programme. "
+        "The following JSON describes the difference between an old route plan and a new one "
+        "after a parameter change. Write exactly 2-3 plain-English sentences summarising what "
+        "changed and why it matters for the mission. Do not speculate beyond the diff numbers. "
+        "Output only the explanation -- no JSON, no markdown.\n\n"
+        + json.dumps(diff)
+    )
+    last_raw = ""
+    for attempt in range(2):
+        try:
+            resp = _groq_client().chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+            last_raw = resp.choices[0].message.content or ""
+            return last_raw.strip()
+        except json.JSONDecodeError:
+            if attempt == 1:
+                raise ValueError(
+                    f"Explanation LLM returned malformed response after retry. Raw: {last_raw!r}"
+                )
+        except (groq_module.APIConnectionError, groq_module.RateLimitError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Groq API unavailable (timeout or connection error): {exc}",
+            ) from exc
+    return ""  # unreachable
+
+
+def _norad_ids_from_plan(plan_result: dict[str, Any]) -> set[int]:
+    """Extract the set of NORAD IDs visited in a plan result.
+    optimizer._label() formats non-depot nodes as 'NAME (norad_id)', so we
+    parse the trailing integer from each route label. Depot label has no parens."""
+    ids: set[int] = set()
+    for label in plan_result.get("route", []):
+        m = re.search(r"\((\d+)\)$", label)
+        if m:
+            ids.add(int(m.group(1)))
+    return ids
+
+
+@app.post("/replan")
+def replan(req: ReplanRequest):
+    """Parse user_request_text into parameter overrides, re-run the plan,
+    diff old vs new, and return a plain-language explanation. Stateless."""
+
+    # ------------------------------------------------------------------ #
+    # Step 1 -- parse overrides from natural language via small LLM       #
+    # ------------------------------------------------------------------ #
+    try:
+        parsed = _parse_overrides(req.user_request_text, req)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    # ------------------------------------------------------------------ #
+    # Step 2 -- if LLM found nothing, return original plan unchanged      #
+    # ------------------------------------------------------------------ #
+    if not parsed or parsed.get("no_changes"):
+        original_plan = _run_plan(req)
+        return {
+            "old_plan": original_plan,
+            "new_plan": original_plan,
+            "diff": {
+                "added": [],
+                "dropped": [],
+                "fuel_delta_km_s": 0.0,
+                "risk_delta": 0.0,
+                "budget_used_delta": 0.0,
+            },
+            "explanation": (
+                "No recognised parameter changes were found in your request. "
+                "The plan is returned unchanged."
+            ),
+            "overrides_applied": {},
+        }
+
+    # ------------------------------------------------------------------ #
+    # Step 3 -- validate overrides before touching the optimizer          #
+    # ------------------------------------------------------------------ #
+    overrides: dict[str, Any] = {}
+
+    if "fuel_budget_km_s" in parsed:
+        v = float(parsed["fuel_budget_km_s"])
+        if v <= 0:
+            raise HTTPException(status_code=422, detail="fuel_budget_km_s must be > 0")
+        overrides["fuel_budget_km_s"] = v
+
+    if "risk_penalty_scale" in parsed:
+        v = float(parsed["risk_penalty_scale"])
+        if v < 0:
+            raise HTTPException(status_code=422, detail="risk_penalty_scale must be >= 0")
+        overrides["risk_penalty_scale"] = v
+
+    if "weights" in parsed:
+        base_weights = req.weights or DEFAULT_WEIGHTS
+        w_raw = parsed["weights"]
+        has_p = "proximity" in w_raw
+        has_l = "lifetime"  in w_raw
+        p = float(w_raw["proximity"]) if has_p else float(base_weights.get("proximity", DEFAULT_WEIGHTS["proximity"]))
+        l = float(w_raw["lifetime"])  if has_l else float(base_weights.get("lifetime",  DEFAULT_WEIGHTS["lifetime"]))
+        if not (0.0 <= p <= 1.0) or not (0.0 <= l <= 1.0):
+            raise HTTPException(status_code=422, detail="Weight values must be in [0, 1]")
+        total = p + l
+        if abs(total - 1.0) > 1e-6:
+            if has_p and not has_l:
+                l = 1.0 - p    # honour the explicit value exactly, derive the other
+            elif has_l and not has_p:
+                p = 1.0 - l
+            else:
+                p, l = p / total, l / total  # both given but don't sum to 1 → normalize
+        overrides["weights"] = {"proximity": round(p, 6), "lifetime": round(l, 6)}
+
+    # ------------------------------------------------------------------ #
+    # Step 4 -- compute old plan (original params) and new plan (merged)  #
+    # ------------------------------------------------------------------ #
+    print(f"[replan] req.model_dump() before old_plan: {req.model_dump()}", flush=True)
+    old_plan = _run_plan(req)
+
+    new_req_data = req.model_dump()
+    new_req_data.update(overrides)
+    # ReplanRequest has user_request_text; PlanRequest doesn't -- strip it
+    new_req_data.pop("user_request_text", None)
+    new_req = PlanRequest(**new_req_data)
+    new_plan = _run_plan(new_req)
+
+    # ------------------------------------------------------------------ #
+    # Step 5 -- diff old vs new                                           #
+    # ------------------------------------------------------------------ #
+    old_ids = _norad_ids_from_plan(old_plan)
+    new_ids = _norad_ids_from_plan(new_plan)
+
+    diff: dict[str, Any] = {
+        "added":   sorted(new_ids - old_ids),
+        "dropped": sorted(old_ids - new_ids),
+        "fuel_delta_km_s":    round(
+            new_plan["total_fuel_cost_km_s"] - old_plan["total_fuel_cost_km_s"], 4
+        ),
+        "risk_delta":         round(
+            new_plan["total_risk_collected"] - old_plan["total_risk_collected"], 4
+        ),
+        "budget_used_delta":  round(
+            new_plan["fuel_used_fraction"] - old_plan["fuel_used_fraction"], 4
+        ),
+    }
+
+    # ------------------------------------------------------------------ #
+    # Step 6 -- ask large LLM for plain-language explanation (diff only)  #
+    # ------------------------------------------------------------------ #
+    try:
+        explanation = _explain_diff(diff)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return {
+        "old_plan":         old_plan,
+        "new_plan":         new_plan,
+        "diff":             diff,
+        "explanation":      explanation,
+        "overrides_applied": overrides,
+    }
 
 
 @app.get("/naive-route")
