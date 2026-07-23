@@ -1,3 +1,31 @@
+## Modules A, B, C (initial build)
+
+Modules done: 3 (A, B, C)
+- Module A — tle_fetch.py + risk_score.py. Pulls live debris positions from
+  Celestrak, filters to the 700-1000km band, scores each object by risk
+  (proximity + orbital lifetime).
+- Module B — delta_v.py + cost_matrix.py + optimizer.py. Physics: Hohmann +
+  inclination-change combined maneuver cost between any two orbits. Then an
+  N×N cost matrix, then the actual OR-Tools orienteering solver — given a
+  fuel budget, picks which debris to visit and in what order to maximize
+  risk removed.
+- Module C — main.py. Wraps A+B in a FastAPI app: GET /debris-field,
+  GET /debris/{norad_id}, POST /plan, GET /naive-route (baseline for the
+  naive-vs-AI comparison in the demo).
+
+Bugs found & fixed: 2
+- tle_fetch.py capped the merged debris list to 300 total after combining
+  all three source clouds in fetch order, so Iridium-33 and Fengyun-1C got
+  silently excluded entirely (one run came back 100% Cosmos). Fixed by
+  capping each group independently before merging.
+- optimizer.py — skipped_objects was computed by matching object names, but
+  real debris fragments share generic names (many different objects all
+  literally named "COSMOS 2251 DEB"). So skipped_count/skipped_names were
+  silently wrong whenever a name collision happened between a visited and a
+  skipped object. Fixed to diff by pool index instead of name, and added
+  (norad_id) to display labels so route output doesn't look like the same
+  object visited 15 times. Verified fixed on live server — sum check: True.
+
 ## POST /replan (new endpoint)
 
 Wraps /plan with Groq-powered natural-language constraint parsing.
