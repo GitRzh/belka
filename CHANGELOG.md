@@ -77,3 +77,55 @@ Also: main.py wasn't loading .env at all (no load_dotenv() call) — added
 near the top, before any os.environ/os.getenv usage. Replaced a leftover
 debug print with logger.debug() under the app.main logger. Added
 pytest==9.1.1 to requirements.txt for the new unit test suite.
+
+## Bug investigation — silent empty-route results in /plan and /replan
+
+A test run surfaced /plan and /replan silently returning visited_count: 0,
+route: [] with a 200 OK and no error — with the exact same payload that
+had previously returned a full route. Root-caused to three mechanisms:
+
+1. risk_penalty_scale below a pool-dependent threshold (~2-3 on the
+   current dataset) makes it cheaper for OR-Tools to skip every node than
+   pay even the cheapest hop. The solver returns a valid, non-None
+   solution, so main.py's `"error" in result` guard never fires.
+2. fuel_budget_km_s below ~0.0005 km/s rounds to 0 in optimizer.py's
+   `budget_scaled = round(fuel_budget_km_s * 1000)`, giving OR-Tools zero
+   capacity — same silent empty-route result.
+3. Celestrak cache refreshes shift per-hop delta-v costs and BSTAR-based
+   risk rankings between runs, gradually changing which objects land in
+   the top-N pool. Not the direct cause of the empty-route bug, but a
+   contributing factor to run-to-run variance.
+
+How it happened: the /replan feature introduced an LLM-driven
+risk_penalty_scale override with only a negative-value check — a Groq
+response like {"risk_penalty_scale": 1.5} passed validation, and a
+subsequent /plan call with those params went silent.
+
+Fixes applied:
+- Added a minimum-value floor to risk_penalty_scale validation in /replan
+  (main.py), rejecting values below the safe threshold with a 422 and a
+  message explaining why. Note: the threshold is pool-dependent, so this
+  floor is a best-effort filter, not a guarantee — see warning field below
+  for the real safety net.
+- Added the same floor pattern for fuel_budget_km_s, rejecting values that
+  would round to zero fuel capacity in the optimizer.
+- _run_plan (shared by both /plan and /replan) now injects a `warning`
+  field into the response whenever visited_count == 0, explaining the
+  likely cause and suggested fix, instead of returning a silent 200 OK
+  with an empty route and no explanation. Chosen over a 4xx because
+  visited_count: 0 can be a valid solver result for well-formed input —
+  raising an error would be misleading and would break /replan's diff
+  logic, which runs _run_plan twice and compares results.
+- Fixed a narration bug in _explain_diff: budget_used_delta is a fractional
+  value (0-1 scale), but the explanation prompt was phrasing it as a raw
+  percentage, understating real budget-usage changes by ~100x.
+
+Verified: full /plan -> /replan sequence against live Celestrak data
+produces a real non-empty route, a correct diff, and no residual `warning`
+key on the healthy path; degenerate inputs correctly surface either a 422
+(validator floor) or a `warning` field (solver-level zero-visit case).
+
+Note: the initial floor of 5 was later found insufficient — a 
+   cross-inclination start (~25° from the debris cluster) still degenerated 
+   at rps=5 (only 1 visit). Raised to 50 after confirming this clears 
+   reliably across tested scenarios.

@@ -95,6 +95,23 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
     if "error" in result:
         raise HTTPException(status_code=422, detail=result["error"])
 
+    # OR-Tools can return a valid (non-None) solution that visits zero nodes
+    # when the per-skip penalty is below the cheapest arc cost -- the solver
+    # finds it optimal to skip everything and pays no fuel.  That is not an
+    # error from the solver's perspective, so "error" is never set and the
+    # guard above doesn't fire.  Flag it explicitly so callers always get a
+    # human-readable explanation rather than a silent empty route.
+    if result["visited_count"] == 0:
+        result["warning"] = (
+            "No debris nodes were visited within the given constraints. "
+            "Possible causes: fuel_budget_km_s is too tight to reach any "
+            "candidate (cheapest hop on this pool is ~0.004 km/s), or "
+            "risk_penalty_scale is too low relative to arc costs (threshold "
+            "~2-3 on the 700-1000km pool), making it cheaper for the solver "
+            "to skip every node. Try raising fuel_budget_km_s or "
+            "risk_penalty_scale."
+        )
+
     result["pool_size_used"] = len(pool)
     return result
 
@@ -197,6 +214,10 @@ def _explain_diff(diff: dict[str, Any]) -> str:
         "The following JSON describes the difference between an old route plan and a new one "
         "after a parameter change. Write exactly 2-3 plain-English sentences summarising what "
         "changed and why it matters for the mission. Do not speculate beyond the diff numbers. "
+        "Important: budget_used_delta is a difference of fuel_used_fraction values, which are "
+        "on a 0-1 scale (e.g. -0.894 means fuel usage dropped by 89.4 percentage points, not "
+        "0.894%). Express it as percentage points (multiply by 100) or describe it using the "
+        "actual fuel_used_fraction values from old_plan/new_plan if they are present. "
         "Output only the explanation -- no JSON, no markdown.\n\n"
         + json.dumps(diff)
     )
@@ -279,12 +300,47 @@ def replan(req: ReplanRequest):
         v = float(parsed["fuel_budget_km_s"])
         if v <= 0:
             raise HTTPException(status_code=422, detail="fuel_budget_km_s must be > 0")
+        # optimizer.py:95 converts the budget to an integer via
+        # round(fuel_budget_km_s * 1000).  Any value below 0.0005 rounds to 0,
+        # setting OR-Tools' Fuel dimension capacity to zero -- no arc can be
+        # traversed, so the solver returns a valid non-None solution that visits
+        # nothing.  That empty route comes back as a silent 200 with no error
+        # key (same degeneration path as a sub-threshold risk_penalty_scale).
+        # 0.001 gives 2× margin above the 0.0005 rounding cliff.
+        if v < 0.001:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"fuel_budget_km_s must be >= 0.001 km/s (got {v}). "
+                    "Values below this round to zero fuel capacity in the "
+                    "optimizer, producing a silent empty route."
+                ),
+            )
         overrides["fuel_budget_km_s"] = v
 
     if "risk_penalty_scale" in parsed:
         v = float(parsed["risk_penalty_scale"])
         if v < 0:
             raise HTTPException(status_code=422, detail="risk_penalty_scale must be >= 0")
+        # The degeneration threshold is pool- and start-position-dependent:
+        # with a same-inclination start, visits drop to 0 below rps~2-3; with
+        # a cross-inclination start, they collapse to near-zero below rps~50.
+        # This floor is therefore a best-effort filter, not a guarantee -- the
+        # warning field on visited_count==0 (main.py:~106) is the real safety
+        # net.  50 is chosen as the floor: it cleared the degeneration zone in
+        # all start configurations tested on the 700-1000km pool (rps=5 still
+        # gave 1 visit from a cross-inclination start; rps=50 gave 7+).
+        if v < 50:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"risk_penalty_scale must be >= 50 (got {v}). "
+                    "The degeneration threshold (where OR-Tools skips all nodes "
+                    "and returns a silent empty route) is pool- and "
+                    "start-position-dependent; 50 is the validated safe floor "
+                    "on the 700-1000km debris pool."
+                ),
+            )
         overrides["risk_penalty_scale"] = v
 
     if "weights" in parsed:
