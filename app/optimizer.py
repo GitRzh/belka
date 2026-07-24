@@ -162,8 +162,26 @@ def optimize_route(
         total_fuel += result_matrix_lookup
         prev_node_index = node_index
 
+    # route_details: full per-object detail in solved visit order.
+    # object_type/removal_method are additive fields from
+    # removal_method.add_removal_methods(), applied once upstream on the
+    # full scored field (main._get_scored_field) before pool selection.
+    # Pulled with .get() defaults, not direct indexing, so this function
+    # doesn't hard-fail if that enrichment step is ever skipped or reordered.
+    route_details = [
+        {
+            "norad_id": o["norad_id"],
+            "name": o["name"],
+            "object_type": o.get("object_type", "unknown"),
+            "removal_method": o.get("removal_method", "unclassified"),
+            "risk_score": round(o.get("risk_score", 0.0), 4),
+        }
+        for o in visited_objects
+    ]
+
     return {
         "route": [_label(o) for o in visited_objects],
+        "route_details": route_details,
         "visited_count": len(visited_objects),
         "skipped_count": len(skipped_objects),
         "skipped_names": [_label(o) for o in skipped_objects],

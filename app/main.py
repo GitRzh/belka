@@ -32,6 +32,7 @@ from app.tle_fetch import get_debris_field
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE
 from app.optimizer import optimize_route, RISK_PENALTY_SCALE
+from app.removal_method import add_removal_methods
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +40,18 @@ app = FastAPI(title="Orbital-Clean API")
 
 
 def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, float]] = None) -> list[dict[str, Any]]:
-    """Shared by /debris-field, /debris/{norad_id}, and /plan so there's one
-    place that does fetch+score -- avoids the three endpoints drifting out
-    of sync on how scoring is applied."""
+    """Shared by /debris-field, /debris/{norad_id}, and /plan/replan so
+    there's one place that does fetch+score+classify. object_type/
+    removal_method are added HERE, once, on the full scored field --
+    not per-pool inside /plan -- so a given norad_id gets the same
+    classification everywhere it appears. add_removal_methods()'s bstar
+    threshold is batch-relative (median among fragments in whatever's
+    passed in); computing it per-pool instead would make the threshold
+    drift with pool_size/weights and disagree across endpoints for the
+    same object."""
     raw = get_debris_field(force_refresh=force_refresh)
-    return score_debris_field(raw, weights=weights or DEFAULT_WEIGHTS)
+    scored = score_debris_field(raw, weights=weights or DEFAULT_WEIGHTS)
+    return add_removal_methods(scored)
 
 
 class PlanRequest(BaseModel):
