@@ -129,3 +129,52 @@ Note: the initial floor of 5 was later found insufficient — a
    cross-inclination start (~25° from the debris cluster) still degenerated 
    at rps=5 (only 1 visit). Raised to 50 after confirming this clears 
    reliably across tested scenarios.
+   
+## Removal-method recommendation (object_type + removal_method classification)
+
+Modules touched: 3 (new: removal_method.py; edited: main.py, optimizer.py)
+
+- New app/removal_method.py — pure lookup-table classification, no LLM.
+  Two real signals already present in Celestrak data: "DEB" in name marks
+  a tracked fragment (absent = intact/parent object); bstar vs the batch
+  median among fragments (area-to-mass proxy) splits fragments into
+  larger (net_capture) vs smaller (monitor_only). Intact objects ->
+  robotic_arm_or_net_capture. add_removal_methods() adds object_type +
+  removal_method additively, same non-mutating pattern as
+  score_debris_field().
+- main.py — _get_scored_field() now calls add_removal_methods() once, on
+  the full scored field, before pool selection. Deliberate: classifying
+  per-pool instead would make the bstar threshold pool-size/weight-
+  dependent, so the same norad_id could get a different removal_method
+  in /debris/{id} vs inside a /plan route. Classifying once upstream
+  means /debris-field, /debris/{norad_id}, /plan, and /replan all agree
+  on the same object's classification.
+- optimizer.py — optimize_route() now returns route_details: full
+  per-visited-object detail (norad_id, name, object_type, removal_method,
+  risk_score) in solved visit order, alongside the existing route (string
+  labels, left unchanged so _norad_ids_from_plan's regex parsing keeps
+  working untouched).
+
+Verified:
+- removal_method.py's own __main__ sanity block: intact objects ->
+  robotic_arm_or_net_capture, fragments correctly split by batch-median
+  bstar. Passing.
+- Confirmed cost_matrix.py's select_candidate_pool() is a pure
+  sort-and-slice (no dict reconstruction) by reading the source directly
+  — this had been flagged as an open assumption before confirming it,
+  since a reconstructing implementation would have silently dropped the
+  new fields at the pool-selection step.
+- End-to-end sanity test (synthetic pool, mixed intact/fragment names,
+  real select_candidate_pool + optimize_route): route_details populated
+  with real classifications for 20/20 visited objects, zero
+  "unknown"/"unclassified" fallbacks triggered.
+
+Bugs found & fixed: 0 (clean wiring; no regressions to /replan's diff
+logic or _norad_ids_from_plan's route-string parsing).
+
+Not yet done (deferred, no code written):
+- _explain_plan() — the LLM narration layer for /plan (hybrid design:
+  lookup everywhere + narration only inside /plan's explanation) is still
+  unbuilt.
+- /naive-route and skipped_objects don't expose route_details/
+  skipped_details yet — not requested this round.
