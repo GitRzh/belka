@@ -1,24 +1,33 @@
+## Module legend
+
+| Module | Files | Purpose |
+|---|---|---|
+| A | `tle_fetch.py`, `risk_score.py` | Data + risk scoring |
+| B | `delta_v.py`, `cost_matrix.py`, `optimizer.py` | Physics + optimizer |
+| C | `main.py` | FastAPI layer |
+| D | `removal_method.py` | Removal-method classification |
+| E | `_explain_plan()` in `main.py` | LLM mission-briefing narration |
+
 ## Modules A, B, C (initial build)
 
 Modules done: 3 (A, B, C)
-- Module A — tle_fetch.py + risk_score.py. Pulls live debris positions from
-  Celestrak, filters to the 700-1000km band, scores each object by risk
-  (proximity + orbital lifetime).
-- Module B — delta_v.py + cost_matrix.py + optimizer.py. Physics: Hohmann +
-  inclination-change combined maneuver cost between any two orbits. Then an
-  N×N cost matrix, then the actual OR-Tools orienteering solver — given a
-  fuel budget, picks which debris to visit and in what order to maximize
-  risk removed.
-- Module C — main.py. Wraps A+B in a FastAPI app: GET /debris-field,
+- Module A — pulls live debris positions from Celestrak, filters to the
+  700-1000km band, scores each object by risk (proximity + orbital
+  lifetime).
+- Module B — physics: Hohmann + inclination-change combined maneuver cost
+  between any two orbits. Then an N×N cost matrix, then the actual
+  OR-Tools orienteering solver — given a fuel budget, picks which debris
+  to visit and in what order to maximize risk removed.
+- Module C — wraps A+B in a FastAPI app: GET /debris-field,
   GET /debris/{norad_id}, POST /plan, GET /naive-route (baseline for the
   naive-vs-AI comparison in the demo).
 
 Bugs found & fixed: 2
-- tle_fetch.py capped the merged debris list to 300 total after combining
+- Module A capped the merged debris list to 300 total after combining
   all three source clouds in fetch order, so Iridium-33 and Fengyun-1C got
   silently excluded entirely (one run came back 100% Cosmos). Fixed by
   capping each group independently before merging.
-- optimizer.py — skipped_objects was computed by matching object names, but
+- Module B — skipped_objects was computed by matching object names, but
   real debris fragments share generic names (many different objects all
   literally named "COSMOS 2251 DEB"). So skipped_count/skipped_names were
   silently wrong whenever a name collision happened between a visited and a
@@ -27,6 +36,8 @@ Bugs found & fixed: 2
   object visited 15 times. Verified fixed on live server — sum check: True.
 
 ## POST /replan (new endpoint)
+
+Modules touched: 1 (C)
 
 Wraps /plan with Groq-powered natural-language constraint parsing.
 openai/gpt-oss-20b extracts parameter overrides from free text (fuel budget,
@@ -80,6 +91,8 @@ pytest==9.1.1 to requirements.txt for the new unit test suite.
 
 ## Bug investigation — silent empty-route results in /plan and /replan
 
+Modules touched: 2 (B, C)
+
 A test run surfaced /plan and /replan silently returning visited_count: 0,
 route: [] with a 200 OK and no error — with the exact same payload that
 had previously returned a full route. Root-caused to three mechanisms:
@@ -103,12 +116,12 @@ subsequent /plan call with those params went silent.
 
 Fixes applied:
 - Added a minimum-value floor to risk_penalty_scale validation in /replan
-  (main.py), rejecting values below the safe threshold with a 422 and a
+  (Module C), rejecting values below the safe threshold with a 422 and a
   message explaining why. Note: the threshold is pool-dependent, so this
   floor is a best-effort filter, not a guarantee — see warning field below
   for the real safety net.
 - Added the same floor pattern for fuel_budget_km_s, rejecting values that
-  would round to zero fuel capacity in the optimizer.
+  would round to zero fuel capacity in the optimizer (Module B).
 - _run_plan (shared by both /plan and /replan) now injects a `warning`
   field into the response whenever visited_count == 0, explaining the
   likely cause and suggested fix, instead of returning a silent 200 OK
@@ -125,45 +138,45 @@ produces a real non-empty route, a correct diff, and no residual `warning`
 key on the healthy path; degenerate inputs correctly surface either a 422
 (validator floor) or a `warning` field (solver-level zero-visit case).
 
-Note: the initial floor of 5 was later found insufficient — a 
-   cross-inclination start (~25° from the debris cluster) still degenerated 
-   at rps=5 (only 1 visit). Raised to 50 after confirming this clears 
+Note: the initial floor of 5 was later found insufficient — a
+   cross-inclination start (~25° from the debris cluster) still degenerated
+   at rps=5 (only 1 visit). Raised to 50 after confirming this clears
    reliably across tested scenarios.
-   
+
 ## Removal-method recommendation (object_type + removal_method classification)
 
-Modules touched: 3 (new: removal_method.py; edited: main.py, optimizer.py)
+Modules touched: 3 (new: D; edited: B, C)
 
-- New app/removal_method.py — pure lookup-table classification, no LLM.
-  Two real signals already present in Celestrak data: "DEB" in name marks
-  a tracked fragment (absent = intact/parent object); bstar vs the batch
+- New Module D — pure lookup-table classification, no LLM. Two real
+  signals already present in Celestrak data: "DEB" in name marks a
+  tracked fragment (absent = intact/parent object); bstar vs the batch
   median among fragments (area-to-mass proxy) splits fragments into
   larger (net_capture) vs smaller (monitor_only). Intact objects ->
   robotic_arm_or_net_capture. add_removal_methods() adds object_type +
   removal_method additively, same non-mutating pattern as
   score_debris_field().
-- main.py — _get_scored_field() now calls add_removal_methods() once, on
+- Module C — _get_scored_field() now calls add_removal_methods() once, on
   the full scored field, before pool selection. Deliberate: classifying
   per-pool instead would make the bstar threshold pool-size/weight-
   dependent, so the same norad_id could get a different removal_method
   in /debris/{id} vs inside a /plan route. Classifying once upstream
   means /debris-field, /debris/{norad_id}, /plan, and /replan all agree
   on the same object's classification.
-- optimizer.py — optimize_route() now returns route_details: full
+- Module B — optimize_route() now returns route_details: full
   per-visited-object detail (norad_id, name, object_type, removal_method,
   risk_score) in solved visit order, alongside the existing route (string
   labels, left unchanged so _norad_ids_from_plan's regex parsing keeps
   working untouched).
 
 Verified:
-- removal_method.py's own __main__ sanity block: intact objects ->
+- Module D's own __main__ sanity block: intact objects ->
   robotic_arm_or_net_capture, fragments correctly split by batch-median
   bstar. Passing.
-- Confirmed cost_matrix.py's select_candidate_pool() is a pure
-  sort-and-slice (no dict reconstruction) by reading the source directly
-  — this had been flagged as an open assumption before confirming it,
-  since a reconstructing implementation would have silently dropped the
-  new fields at the pool-selection step.
+- Confirmed Module B's select_candidate_pool() is a pure sort-and-slice
+  (no dict reconstruction) by reading the source directly — this had
+  been flagged as an open assumption before confirming it, since a
+  reconstructing implementation would have silently dropped the new
+  fields at the pool-selection step.
 - End-to-end sanity test (synthetic pool, mixed intact/fragment names,
   real select_candidate_pool + optimize_route): route_details populated
   with real classifications for 20/20 visited objects, zero
@@ -176,5 +189,100 @@ Not yet done (deferred, no code written):
 - _explain_plan() — the LLM narration layer for /plan (hybrid design:
   lookup everywhere + narration only inside /plan's explanation) is still
   unbuilt.
-- /naive-route and skipped_objects don't expose route_details/
-  skipped_details yet — not requested this round.
+
+## _explain_plan() — Module E, mission-briefing narration
+
+Modules touched: 1 (new: E, in main.py)
+
+- New _explain_plan() — Groq openai/gpt-oss-120b (same model as
+  _explain_diff), given ONLY aggregated numbers (visited_count,
+  removal_method_counts, fuel/risk totals, skipped_count), never raw
+  per-object data — narrates, never decides. 2-3 sentence plain-English
+  mission briefing.
+- Retry logic: RateLimitError -> no retry (retrying into an active rate
+  limit makes it worse), immediate soft-fail to None. APIConnectionError
+  -> one retry with a 1.5s backoff, then soft-fail to None. Empty
+  route_details -> short-circuits before any Groq call (nothing to
+  narrate).
+- Soft-fail contract: /plan and /replan never hard-fail on narration
+  failure — explanation: null + explanation_error with a retry hint,
+  route/plan data always returned regardless.
+- Wired into POST /plan (after _run_plan() returns) and POST /replan:
+  no_changes path narrates once (old_plan and new_plan are the same
+  dict object, confirmed via live test); real-override path narrates
+  ONLY new_plan (old_plan is being discarded, no value briefing a plan
+  about to be replaced) — confirmed via live test that old_plan has no
+  explanation key at all, new_plan does. Deliberate choice to avoid
+  doubling Groq calls for zero benefit.
+
+Verified: 9-step live test sequence, all passed, zero regressions —
+epoch_age_days present/numeric/non-negative on all fetched objects; /plan
+happy path returns real narration mentioning removal-method mix and a
+generic skip reason; /plan tight-budget edge case returns explanation:
+null with no explanation_error (visited_count==0 guard); /replan
+no_changes path confirmed old_plan.explanation == new_plan.explanation
+(same string); /replan real-override path confirmed old_plan has no
+explanation key, new_plan does; mocked retry logic confirmed exactly as
+designed (RateLimitError = 1 call no retry, APIConnectionError = 2 calls
+with backoff, empty route_details = 0 calls).
+
+Bugs found & fixed: 0 (clean addition).
+
+## Method maturity, nets_carried cap, removal_method_filter, target_norad_id, naive-route parity
+
+Modules touched: 3 (D, B, C)
+
+- Module D — intact objects now unpack their bundled
+  robotic_arm_or_net_capture label into possible_methods (both
+  techniques) + method_maturity (per-technique real-world flight
+  status: robotic_arm=conceptual, net_capture=flight_demonstrated).
+  removal_method stays a bare string for backward compat.
+- Module B — added a nets_carried cap as a real OR-Tools dimension
+  (0 to nets_carried, fixed start at 0), not just advisory. route_details
+  now also carries possible_methods/method_maturity per visited object.
+  select_candidate_pool() now excludes monitor_only before sort/slice,
+  so it never occupies a pool slot or gets routed.
+- Module C — new removal_method_filter (robotic_arm_or_net_capture or
+  net_capture only; monitor_only rejected, garbage values rejected, all
+  via 422) on /plan and /replan. New target_norad_id forces a specific
+  object into the pool even if outside the risk-score cutoff; rejected if
+  the target is monitor_only or filtered out (404 with a hint pointing at
+  removal_method_filter). /naive-route now returns route_details and an
+  explanation, matching /plan's shape (soft-fails cleanly if the
+  explainer errors, no 500).
+- Housekeeping: replaced a second leftover debug print() (in replan())
+  with logger.debug().
+
+Verified: 30/30 unit tests passing (app/test_new_features.py), source
+read directly to confirm test assertions match real behavior, not just
+mocked shape.
+
+Not yet done: frontend (Week 5) not started.
+
+## README — Explainability + Real-World Grounding sections
+
+Modules touched: 0 (docs only)
+
+- Explainability section: spells out that removal_method is a
+  deterministic lookup (removal_method.py, no LLM) and risk_score is an
+  explicit weighted formula (risk_score.py) — LLM only narrates plans/
+  diffs, never decides them. Flags risk_score as a relative within-batch
+  ranking, not an absolute collision probability.
+- Real-World Grounding section: cites NASA-TS-8719.14 and the Orbital
+  Debris Program Office's ~5-highest-risk-objects/year finding as the
+  premise behind risk-ranked optimization over naive nearest-neighbor.
+  Grounds removal_method's two families against RemoveDEBRIS (net/harpoon,
+  flown 2018-2019) and ELSA-d (magnetic capture, flown/de-orbited Jan
+  2024); ClearSpace-1 noted as in-development, not flown. Explicitly
+  discloses no verified per-mission delta-v/fuel figures were found
+  (limitation, not an estimate). delta_v.py validated against 4 textbook
+  orbital-mechanics benchmarks (LEO->GEO Hohmann, 90° plane change,
+  GTO->GEO at Cape Canaveral and Kourou), reproducing the known
+  equatorial-vs-non-equatorial GEO cost gap. Discloses nets_carried
+  default of 1 as matching RemoveDEBRIS's actual flight history (it
+  carried exactly one net); robotic_arm_or_net_capture's reusability
+  assumption flagged as having no flown precedent on uncooperative
+  debris (only real reusable-capture design, ELSA-M, needs a
+  pre-installed docking plate); no collision/conjunction (CDM) screening
+  performed, disclosed as a real operational step this tool doesn't
+  model.
