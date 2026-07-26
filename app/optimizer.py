@@ -27,8 +27,12 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 try:
     from .cost_matrix import build_cost_matrix, scale_matrix_for_ortools
+    from .removal_method import METHOD_NET_CAPTURE
 except ImportError:
     from cost_matrix import build_cost_matrix, scale_matrix_for_ortools  # pyright: ignore[reportImplicitRelativeImport]
+    from removal_method import METHOD_NET_CAPTURE  # pyright: ignore[reportImplicitRelativeImport]
+
+DEFAULT_NETS_CARRIED = 1  # RemoveDEBRIS's actual flight history: exactly one net carried.
 
 RISK_PENALTY_SCALE = 3000.0  # risk_score in [0,1] -> penalty in scaled cost units
                               # (units match cost_matrix.DELTA_V_SCALE: 1 unit = 1 m/s)
@@ -56,11 +60,17 @@ def optimize_route(
     start_altitude_km: float,
     start_inclination_deg: float,
     risk_penalty_scale: float = RISK_PENALTY_SCALE,
+    nets_carried: int = DEFAULT_NETS_CARRIED,
 ) -> dict[str, Any]:
     """
     Solve the orienteering problem over `pool` (the ~30-50 candidate objects
     from cost_matrix.select_candidate_pool()), starting from the spacecraft's
     current orbit, subject to a total delta-v budget.
+
+    nets_carried caps how many net_capture stops the route may include --
+    a real hardware constraint, not a tunable knob: RemoveDEBRIS (the only
+    flown precedent) carried exactly one net. Default 1 reflects that;
+    callers can raise it for an explicit exploratory/hypothetical run.
 
     Returns route order, visited vs skipped candidates, total fuel cost,
     per-step cost breakdown, and how much of the budget got used.
@@ -94,6 +104,23 @@ def optimize_route(
 
     budget_scaled = round(fuel_budget_km_s * 1000)  # matches cost_matrix.DELTA_V_SCALE
     routing.AddDimension(transit_callback_index, 0, budget_scaled, True, "Fuel")
+
+    # Net-capacity dimension: each net_capture node arriving consumes 1 unit
+    # of a nets_carried-sized capacity, same pattern as a CVRP demand
+    # dimension. Nodes with any other removal_method (or none, e.g. objects
+    # that never went through add_removal_methods) consume 0 and are
+    # unaffected. This is a real hardware cap, not a soft preference --
+    # AddDisjunction below still decides whether any given node is worth
+    # visiting at all; this only bounds how many net_capture stops can be
+    # among those chosen.
+    def net_capacity_callback(from_index: int) -> int:
+        from_node = manager.IndexToNode(from_index)
+        if 1 <= from_node <= n_pool and pool[from_node - 1].get("removal_method") == METHOD_NET_CAPTURE:
+            return 1
+        return 0
+
+    net_capacity_callback_index = routing.RegisterUnaryTransitCallback(net_capacity_callback)
+    routing.AddDimension(net_capacity_callback_index, 0, nets_carried, True, "NetCapacity")
 
     # Every pool node (indices 1..n_pool) is optional at a risk-proportional penalty.
     for i, obj in enumerate(pool):
@@ -174,6 +201,8 @@ def optimize_route(
             "name": o["name"],
             "object_type": o.get("object_type", "unknown"),
             "removal_method": o.get("removal_method", "unclassified"),
+            "possible_methods": o.get("possible_methods", []),
+            "method_maturity": o.get("method_maturity", {}),
             "risk_score": round(o.get("risk_score", 0.0), 4),
         }
         for o in visited_objects
@@ -190,6 +219,7 @@ def optimize_route(
         "fuel_used_fraction": round(total_fuel / fuel_budget_km_s, 4) if fuel_budget_km_s > 0 else 0.0,
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
         "step_breakdown": step_breakdown,
+        "net_capacity_constrained": nets_carried,
     }
 
 
@@ -198,6 +228,7 @@ if __name__ == "__main__":
 
     from cost_matrix import select_candidate_pool  # pyright: ignore[reportImplicitRelativeImport]
     from risk_score import score_debris_field  # pyright: ignore[reportImplicitRelativeImport]
+    from removal_method import add_removal_methods  # pyright: ignore[reportImplicitRelativeImport]
 
     # Same synthetic 3-cluster field as cost_matrix.py's test, for continuity.
     random.seed(42)
@@ -205,11 +236,16 @@ if __name__ == "__main__":
     clusters = [("COSMOS", 74.0, 780.0), ("IRIDIUM", 86.4, 800.0), ("FENGYUN", 98.8, 850.0)]
     obj_id = 0
     for name, base_incl, base_alt in clusters:
-        for _ in range(15):
+        for k in range(15):
             obj_id += 1
+            # First of each cluster is intact (no "DEB"); rest are fragments,
+            # so removal_method classification (and therefore nets_carried /
+            # monitor_only exclusion below) has something real to act on --
+            # an all-intact synthetic pool would make both a silent no-op.
+            label = f"{name}-{obj_id}" if k == 0 else f"{name} DEB-{obj_id}"
             synthetic.append({
                 "norad_id": 10000 + obj_id,
-                "name": f"{name}-{obj_id}",
+                "name": label,
                 "altitude_km": round(base_alt + random.uniform(-20, 20), 2),
                 "inclination_deg": round(base_incl + random.uniform(-0.3, 0.3), 4),
                 "latitude": 0.0,
@@ -217,8 +253,9 @@ if __name__ == "__main__":
                 "bstar": random.uniform(0.00001, 0.0001),
             })
 
-    scored = score_debris_field(synthetic)
+    scored = add_removal_methods(score_debris_field(synthetic))
     pool = select_candidate_pool(scored, pool_size=40)
+    print(f"Pool method mix: { {m: sum(1 for o in pool if o['removal_method']==m) for m in set(o['removal_method'] for o in pool)} }")
 
     # Placeholder start orbit -- in the real app this comes from the
     # spacecraft's actual current state, not a guess. Picked near the
@@ -254,4 +291,29 @@ if __name__ == "__main__":
         "More budget should never visit FEWER nodes -- monotonicity broken!"
     print("  Budget never exceeded: OK")
     print("  Visit count monotonically non-decreasing with budget: OK")
-    print("  (If this had failed, the model would be broken -- these are non-negotiable invariants.)")
+
+    # nets_carried cap: with a generous fuel budget (so fuel isn't the
+    # binding constraint) and a low net cap, net_capture visits must not
+    # exceed the cap -- confirms the dimension is actually constraining,
+    # not just present and unused.
+    net_capped = optimize_route(pool, fuel_budget_km_s=10.0, start_altitude_km=start_alt,
+                                 start_inclination_deg=start_incl, nets_carried=1)
+    net_visits = sum(1 for d in net_capped["route_details"] if d["removal_method"] == "net_capture")
+    print(f"\n  nets_carried=1 test: {net_visits} net_capture stop(s) visited (must be <= 1), "
+          f"net_capacity_constrained={net_capped['net_capacity_constrained']}")
+    assert net_visits <= 1, "nets_carried cap violated -- more net_capture stops than allowed!"
+    assert net_capped["net_capacity_constrained"] == 1
+
+    net_uncapped = optimize_route(pool, fuel_budget_km_s=10.0, start_altitude_km=start_alt,
+                                   start_inclination_deg=start_incl, nets_carried=99)
+    net_uncapped_visits = sum(1 for d in net_uncapped["route_details"] if d["removal_method"] == "net_capture")
+    print(f"  nets_carried=99 test: {net_uncapped_visits} net_capture stop(s) visited (should be >= the capped count)")
+    assert net_uncapped_visits >= net_visits, "Raising the cap should never visit FEWER net_capture nodes!"
+
+    # monitor_only must never appear in route_details at all -- select_candidate_pool
+    # (cost_matrix.py) excludes it before the pool even reaches this module.
+    assert all(d["removal_method"] != "monitor_only" for r in (tight, generous, mid, net_capped) for d in r["route_details"]), \
+        "monitor_only object made it into a route -- pool filtering regressed!"
+    print("  nets_carried cap respected and actually binding: OK")
+    print("  monitor_only never routed: OK")
+    print("  (If any of this had failed, the model would be broken -- these are non-negotiable invariants.)")

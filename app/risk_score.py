@@ -18,6 +18,14 @@ constraint parser (e.g. "prioritize riskiest debris" -> bump w_proximity).
 """
 from typing import Any
 
+RISK_SCORE_DISCLAIMER = (
+    "risk_score is a relative ranking within this scored batch, not an "
+    "absolute collision probability or a NASA-standard conjunction metric. "
+    "It blends local congestion (proximity_score) and estimated residual "
+    "orbital lifetime from drag (lifetime_score) -- useful for prioritizing "
+    "which objects to target first, not for reporting probability-of-collision."
+)
+
 ALT_WINDOW_KM = 25.0     # objects within this altitude band count as "neighbors"
 INCL_WINDOW_DEG = 5.0    # and within this inclination band
 MAX_EXPECTED_NEIGHBORS = 30.0  # neighbor count that saturates proximity_score at 1.0

@@ -17,8 +17,10 @@ from typing import Any
 
 try:
     from .delta_v import transfer_delta_v  # when imported as part of the app package
+    from .removal_method import METHOD_MONITOR_ONLY
 except ImportError:
     from delta_v import transfer_delta_v  # pyright: ignore[reportImplicitRelativeImport]
+    from removal_method import METHOD_MONITOR_ONLY  # pyright: ignore[reportImplicitRelativeImport]
 
 DEFAULT_POOL_SIZE = 40  # per handoff: ~30-50 candidates, not a forced top-5
 DELTA_V_SCALE = 1000    # km/s -> integer units for OR-Tools (1 unit = 1 m/s of delta-v)
@@ -30,8 +32,17 @@ def select_candidate_pool(
 ) -> list[dict[str, Any]]:
     """Take the top `pool_size` objects by risk_score. score_debris_field()
     already returns its list sorted descending, but this re-sorts defensively
-    so it's correct even if called on unsorted input."""
-    ordered = sorted(scored_objects, key=lambda o: o.get("risk_score", 0.0), reverse=True)
+    so it's correct even if called on unsorted input.
+
+    monitor_only objects are excluded before the sort/slice, not after:
+    they mean "too small/scattered to realistically capture, real missions
+    track these from the ground" -- they were never real visitable targets,
+    so they shouldn't occupy a pool slot or be routable at all. Objects
+    with no removal_method yet (e.g. this module's own __main__ test data,
+    or any caller that hasn't run add_removal_methods()) pass through
+    unaffected -- .get() returns None, which never equals the sentinel."""
+    routable = [o for o in scored_objects if o.get("removal_method") != METHOD_MONITOR_ONLY]
+    ordered = sorted(routable, key=lambda o: o.get("risk_score", 0.0), reverse=True)
     return ordered[:pool_size]
 
 

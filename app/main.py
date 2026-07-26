@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Optional
 
 import groq as groq_module
@@ -32,7 +33,11 @@ from app.tle_fetch import get_debris_field
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE
 from app.optimizer import optimize_route, RISK_PENALTY_SCALE
-from app.removal_method import add_removal_methods
+from app.removal_method import add_removal_methods, METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE, METHOD_MONITOR_ONLY
+
+# monitor_only excluded: it's never a real route target (see cost_matrix.
+# select_candidate_pool), so it's not a legal removal_method_filter value.
+_VALID_REMOVAL_METHOD_FILTERS = {METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE}
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,9 @@ class PlanRequest(BaseModel):
     pool_size: int = Field(DEFAULT_POOL_SIZE, gt=0, description="How many top-risk candidates the optimizer considers")
     risk_penalty_scale: float = Field(RISK_PENALTY_SCALE, description="Tuning knob: higher = solver skips fewer risky nodes even if fuel-expensive")
     weights: Optional[dict[str, float]] = Field(None, description="Override risk_score.py DEFAULT_WEIGHTS, e.g. {'proximity': 0.8, 'lifetime': 0.2}")
+    nets_carried: int = Field(1, ge=1, description="Max net_capture stops in the route. Default 1 matches RemoveDEBRIS's actual flight history (it carried exactly one net) -- raise for an explicit exploratory what-if run.")
+    removal_method_filter: Optional[str] = Field(None, description=f"Restrict the route to a single removal method -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}. No real ADR mission has flown mixed capture hardware (RemoveDEBRIS = net+harpoon only, ELSA-M = magnetic docking only), so this models 'one spacecraft, one hardware type'. Unset preserves the current mixed-method behavior.")
+    target_norad_id: Optional[int] = Field(None, description="Force this object to be considered by the optimizer even if it wouldn't normally rank into the top pool_size by risk. The optimizer still decides whether to actually visit it (AddDisjunction still applies) -- this only guarantees consideration, not a visit. Rejected if the object is classified monitor_only (never a real target).")
 
 
 class ReplanRequest(PlanRequest):
@@ -90,7 +98,41 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
     if not scored:
         raise HTTPException(status_code=502, detail="Debris field empty -- Celestrak fetch may have failed")
 
+    if req.removal_method_filter is not None:
+        if req.removal_method_filter not in _VALID_REMOVAL_METHOD_FILTERS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"removal_method_filter must be one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)} "
+                    f"or omitted, got {req.removal_method_filter!r}. monitor_only is not a legal "
+                    "filter value -- those objects are never routable at all."
+                ),
+            )
+        scored = [o for o in scored if o.get("removal_method") == req.removal_method_filter]
+
+    # Filtering happens on `scored` (before pool selection) rather than
+    # after, so select_candidate_pool's top-pool_size ranking is computed
+    # over the already-restricted set -- otherwise a filter could silently
+    # shrink the effective pool below pool_size even when plenty of
+    # matching objects exist further down the risk ranking.
     pool = select_candidate_pool(scored, pool_size=req.pool_size)
+
+    if req.target_norad_id is not None:
+        target_obj = next((o for o in scored if o["norad_id"] == req.target_norad_id), None)
+        if target_obj is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"target_norad_id {req.target_norad_id} not found in the current debris field"
+                + (" (or excluded by removal_method_filter)" if req.removal_method_filter else ""),
+            )
+        if target_obj.get("removal_method") == METHOD_MONITOR_ONLY:
+            raise HTTPException(
+                status_code=422,
+                detail=f"target_norad_id {req.target_norad_id} is classified monitor_only -- "
+                       "not a viable route target (see monitor_only pool exclusion).",
+            )
+        if not any(o["norad_id"] == req.target_norad_id for o in pool):
+            pool = pool + [target_obj]  # guarantee consideration; still not a forced visit
 
     result = optimize_route(
         pool,
@@ -98,6 +140,7 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
         start_altitude_km=req.start_altitude_km,
         start_inclination_deg=req.start_inclination_deg,
         risk_penalty_scale=req.risk_penalty_scale,
+        nets_carried=req.nets_carried,
     )
 
     if "error" in result:
@@ -127,7 +170,15 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
 @app.post("/plan")
 def plan(req: PlanRequest):
     """Risk-ranked pool -> orienteering optimizer -> route + reasoning-ready breakdown."""
-    return _run_plan(req)
+    result = _run_plan(req)
+    explanation = _explain_plan(result)
+    result["explanation"] = explanation
+    if explanation is None and result.get("visited_count", 0) > 0:
+        result["explanation_error"] = (
+            "Mission briefing generation failed or was rate-limited. "
+            "Route data above is valid; retry to get a narrated briefing."
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +188,7 @@ def plan(req: PlanRequest):
 # groq==0.11.0 supports response_format={"type": "json_object"} only (no
 # json_schema mode). The JSON schema is described in the system prompt instead.
 _GROQ_TIMEOUT = 20.0
-_ALLOWED_OVERRIDE_KEYS = {"fuel_budget_km_s", "risk_penalty_scale", "weights", "no_changes"}
+_ALLOWED_OVERRIDE_KEYS = {"fuel_budget_km_s", "risk_penalty_scale", "weights", "removal_method_filter", "no_changes"}
 
 def _build_parse_prompt(req: "PlanRequest") -> str:
     """Build the system prompt with current parameter values embedded so the
@@ -150,12 +201,15 @@ def _build_parse_prompt(req: "PlanRequest") -> str:
         f"  risk_penalty_scale = {req.risk_penalty_scale}  (also called: risk penalty, risk weight, risk aggressiveness)\n"
         f"  weights.proximity  = {base_weights.get('proximity', DEFAULT_WEIGHTS['proximity'])}  (also called: proximity weight, congestion weight)\n"
         f"  weights.lifetime   = {base_weights.get('lifetime',  DEFAULT_WEIGHTS['lifetime'])}  (also called: lifetime weight, drag weight)\n"
+        f"  removal_method_filter = {req.removal_method_filter!r}  (also called: capture method, hardware type; "
+        f"valid values are {sorted(_VALID_REMOVAL_METHOD_FILTERS)} or null for no filter/mixed methods)\n"
         "\n"
         "From the user's message, extract ONLY the parameters they want to change and output a single valid JSON object. "
         "The only keys you may emit are:\n"
         "  fuel_budget_km_s   -- positive float (km/s)\n"
         "  risk_penalty_scale -- non-negative float\n"
         "  weights            -- object with keys 'proximity' (float 0-1) and/or 'lifetime' (float 0-1)\n"
+        f"  removal_method_filter -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}, or null to clear an existing filter\n"
         "\n"
         "Rules:\n"
         "- Resolve relative instructions using the current values shown above "
@@ -252,6 +306,62 @@ def _explain_diff(diff: dict[str, Any]) -> str:
     return ""  # unreachable
 
 
+def _explain_plan(route_result: dict[str, Any]) -> Optional[str]:
+    """Call openai/gpt-oss-120b with route_details (+ skip context) to
+    generate a 2-3 sentence plain-language mission briefing. Soft-fails:
+    on any LLM error, returns None instead of raising, so /plan always
+    returns the route even if narration is unavailable. Retries once
+    with a short backoff -- but NOT on RateLimitError, since retrying
+    into an active rate limit only makes it worse."""
+    details = route_result.get("route_details", [])
+    if not details:
+        return None  # nothing visited -- the `warning` field already covers this case
+
+    method_counts: dict[str, int] = {}
+    for obj in details:
+        m = obj.get("removal_method", "unclassified")
+        method_counts[m] = method_counts.get(m, 0) + 1
+
+    prompt = (
+        "You are a mission-briefing assistant for an orbital debris removal programme. "
+        "Write exactly 2-3 plain-English sentences briefing the operator on this planned route. "
+        "Focus on: how many objects are targeted, the mix of removal methods needed, and total "
+        "fuel/risk collected. If any objects were skipped, add a brief, high-level reason "
+        "(cost-vs-risk tradeoff) -- do not speculate about specific objects that were skipped. "
+        "Output only the briefing -- no JSON, no markdown.\n\n"
+        + json.dumps({
+            "visited_count": route_result.get("visited_count"),
+            "removal_method_counts": method_counts,
+            "total_fuel_cost_km_s": route_result.get("total_fuel_cost_km_s"),
+            "fuel_budget_km_s": route_result.get("fuel_budget_km_s"),
+            "fuel_used_fraction": route_result.get("fuel_used_fraction"),
+            "total_risk_collected": route_result.get("total_risk_collected"),
+            "skipped_count": route_result.get("skipped_count"),
+        })
+    )
+
+    last_raw = ""
+    for attempt in range(2):
+        try:
+            resp = _groq_client().chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+            last_raw = resp.choices[0].message.content or ""
+            return last_raw.strip()
+        except groq_module.RateLimitError as exc:
+            # Do not retry -- retrying into a live rate limit just digs deeper.
+            logger.warning("[_explain_plan] rate limited, not retrying: %s", exc)
+            return None
+        except groq_module.APIConnectionError as exc:
+            if attempt == 1:
+                logger.warning("[_explain_plan] connection error after retry: %s", exc)
+                return None
+            time.sleep(1.5)  # brief backoff before the single retry, not an immediate re-hit
+    return None  # unreachable; satisfies type-checker
+
+
 def _norad_ids_from_plan(plan_result: dict[str, Any]) -> set[int]:
     """Extract the set of NORAD IDs visited in a plan result.
     optimizer._label() formats non-depot nodes as 'NAME (norad_id)', so we
@@ -282,6 +392,7 @@ def replan(req: ReplanRequest):
     # ------------------------------------------------------------------ #
     if not parsed or parsed.get("no_changes"):
         original_plan = _run_plan(req)
+        original_plan["explanation"] = _explain_plan(original_plan)
         return {
             "old_plan": original_plan,
             "new_plan": original_plan,
@@ -370,10 +481,20 @@ def replan(req: ReplanRequest):
                 p, l = p / total, l / total  # both given but don't sum to 1 → normalize
         overrides["weights"] = {"proximity": round(p, 6), "lifetime": round(l, 6)}
 
+    if "removal_method_filter" in parsed:
+        v = parsed["removal_method_filter"]
+        if v is not None and v not in _VALID_REMOVAL_METHOD_FILTERS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"removal_method_filter must be one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)} "
+                       f"or null, got {v!r}",
+            )
+        overrides["removal_method_filter"] = v  # None is a valid, meaningful override (clears the filter)
+
     # ------------------------------------------------------------------ #
     # Step 4 -- compute old plan (original params) and new plan (merged)  #
     # ------------------------------------------------------------------ #
-    print(f"[replan] req.model_dump() before old_plan: {req.model_dump()}", flush=True)
+    logger.debug("[replan] req.model_dump() before old_plan: %s", req.model_dump())
     old_plan = _run_plan(req)
 
     new_req_data = req.model_dump()
@@ -410,6 +531,20 @@ def replan(req: ReplanRequest):
         explanation = _explain_diff(diff)
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+    # ------------------------------------------------------------------ #
+    # Step 7 -- narrate new_plan only (not old_plan -- it's being         #
+    # discarded, no value briefing a plan the user is replacing). Soft-  #
+    # fails to None, same as /plan, rather than raising -- the diff      #
+    # explanation above is the primary payload of /replan; a briefing    #
+    # failure here shouldn't take down an otherwise-successful response. #
+    # ------------------------------------------------------------------ #
+    new_plan["explanation"] = _explain_plan(new_plan)
+    if new_plan["explanation"] is None and new_plan.get("visited_count", 0) > 0:
+        new_plan["explanation_error"] = (
+            "Mission briefing generation failed or was rate-limited. "
+            "Route data above is valid; retry to get a narrated briefing."
+        )
 
     return {
         "old_plan":         old_plan,
@@ -453,8 +588,27 @@ def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_bud
         current = next_idx
 
     visited_objects = [nodes[i] for i in visited_idx]
-    return {
+
+    # route_details in the same shape optimize_route() produces, so
+    # _explain_plan() (which reads removal_method off route_details to
+    # build its method-mix summary) works identically for both routes --
+    # required for the naive-vs-AI comparison to actually be a fair one.
+    route_details = [
+        {
+            "norad_id": o["norad_id"],
+            "name": o["name"],
+            "object_type": o.get("object_type", "unknown"),
+            "removal_method": o.get("removal_method", "unclassified"),
+            "possible_methods": o.get("possible_methods", []),
+            "method_maturity": o.get("method_maturity", {}),
+            "risk_score": round(o.get("risk_score", 0.0), 4),
+        }
+        for o in visited_objects
+    ]
+
+    result = {
         "route": [o["name"] for o in visited_objects],
+        "route_details": route_details,
         "visited_count": len(visited_objects),
         "skipped_count": len(pool) - len(visited_objects),
         "total_fuel_cost_km_s": round(fuel_used, 4),
@@ -463,3 +617,12 @@ def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_bud
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
         "step_breakdown": steps,
     }
+
+    explanation = _explain_plan(result)
+    result["explanation"] = explanation
+    if explanation is None and result.get("visited_count", 0) > 0:
+        result["explanation_error"] = (
+            "Mission briefing generation failed or was rate-limited. "
+            "Route data above is valid; retry to get a narrated briefing."
+        )
+    return result

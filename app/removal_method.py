@@ -39,6 +39,26 @@ METHOD_ROBOTIC_ARM_OR_NET = "robotic_arm_or_net_capture"
 METHOD_NET_CAPTURE = "net_capture"
 METHOD_MONITOR_ONLY = "monitor_only"
 
+# Individual technique identifiers. removal_method (above) can bundle two of
+# these under one ambiguous label for intact objects -- possible_methods /
+# method_maturity below unpack that bundle so maturity isn't hidden behind
+# a single label implying equal confidence in both techniques.
+TECHNIQUE_ROBOTIC_ARM = "robotic_arm"
+TECHNIQUE_NET_CAPTURE = "net_capture"
+TECHNIQUE_MONITOR_ONLY = "monitor_only"
+
+# Real-world flight status per technique (see README "Real-World Grounding"):
+# - net_capture: flight-demonstrated (RemoveDEBRIS, 2018-2019).
+# - robotic_arm: conceptual -- no flown precedent capturing UNCOOPERATIVE
+#   debris (ClearSpace-1 is single-target/unflown; ELSA-M's reusable
+#   capture only works on targets with a pre-installed docking plate).
+# - monitor_only: not a capture technique at all -- ground-based tracking
+#   of this population is already real and operational (Space Surveillance
+#   Network), just not something this system routes a spacecraft to.
+MATURITY_FLIGHT_DEMONSTRATED = "flight_demonstrated"
+MATURITY_CONCEPTUAL = "conceptual"
+MATURITY_OPERATIONAL = "operational"
+
 
 def classify_object_type(name: str) -> str:
     """'DEB' in the name marks a tracked fragment; its absence marks an
@@ -62,11 +82,33 @@ def _fragment_bstar_threshold(objects: list[dict[str, Any]]) -> float:
     return statistics.median(fragment_bstars)
 
 
-def _removal_method_for(object_type: str, bstar: float, threshold: float) -> str:
+def _removal_method_for(object_type: str, bstar: float, threshold: float) -> dict[str, Any]:
+    """Returns removal_method (bare label, unchanged for backward compat)
+    plus possible_methods/method_maturity -- the individual technique(s)
+    that label may bundle, each rated by real flight status. Intact
+    objects get an honest two-technique hedge (data can't discriminate
+    further); fragments get a single-item list either way."""
     if object_type == OBJECT_TYPE_INTACT:
-        return METHOD_ROBOTIC_ARM_OR_NET
+        return {
+            "removal_method": METHOD_ROBOTIC_ARM_OR_NET,
+            "possible_methods": [TECHNIQUE_ROBOTIC_ARM, TECHNIQUE_NET_CAPTURE],
+            "method_maturity": {
+                TECHNIQUE_ROBOTIC_ARM: MATURITY_CONCEPTUAL,
+                TECHNIQUE_NET_CAPTURE: MATURITY_FLIGHT_DEMONSTRATED,
+            },
+        }
     # object_type == fragment
-    return METHOD_MONITOR_ONLY if abs(bstar) > threshold else METHOD_NET_CAPTURE
+    if abs(bstar) > threshold:
+        return {
+            "removal_method": METHOD_MONITOR_ONLY,
+            "possible_methods": [TECHNIQUE_MONITOR_ONLY],
+            "method_maturity": {TECHNIQUE_MONITOR_ONLY: MATURITY_OPERATIONAL},
+        }
+    return {
+        "removal_method": METHOD_NET_CAPTURE,
+        "possible_methods": [TECHNIQUE_NET_CAPTURE],
+        "method_maturity": {TECHNIQUE_NET_CAPTURE: MATURITY_FLIGHT_DEMONSTRATED},
+    }
 
 
 def add_removal_methods(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -81,11 +123,11 @@ def add_removal_methods(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
     enriched = []
     for obj in objects:
         obj_type = classify_object_type(obj.get("name", ""))
-        method = _removal_method_for(obj_type, obj.get("bstar", 0.0), threshold)
+        method_info = _removal_method_for(obj_type, obj.get("bstar", 0.0), threshold)
         enriched.append({
             **obj,
             "object_type": obj_type,
-            "removal_method": method,
+            **method_info,  # removal_method, possible_methods, method_maturity
         })
     return enriched
 
@@ -105,11 +147,24 @@ if __name__ == "__main__":
     result = add_removal_methods(sample)
     print(f"Classified {len(result)} objects (fragment bstar threshold computed from batch median):\n")
     for o in result:
-        print(f"  {o['name']:<28} type={o['object_type']:<9} bstar={o['bstar']:.5f} -> {o['removal_method']}")
+        print(f"  {o['name']:<28} type={o['object_type']:<9} bstar={o['bstar']:.5f} -> {o['removal_method']:<26} possible={o['possible_methods']} maturity={o['method_maturity']}")
 
     # Sanity checks
     assert result[0]["object_type"] == OBJECT_TYPE_INTACT
     assert result[0]["removal_method"] == METHOD_ROBOTIC_ARM_OR_NET
     assert result[4]["object_type"] == OBJECT_TYPE_INTACT
     assert all(o["object_type"] == OBJECT_TYPE_FRAGMENT for o in [result[1], result[2], result[3]])
-    print("\nSanity checks passed: intact objects -> robotic_arm_or_net, fragments split by median bstar.")
+
+    # New this round: removal_method stays a bare string (backward compat),
+    # possible_methods/method_maturity unpack it.
+    assert result[0]["possible_methods"] == [TECHNIQUE_ROBOTIC_ARM, TECHNIQUE_NET_CAPTURE]
+    assert result[0]["method_maturity"] == {
+        TECHNIQUE_ROBOTIC_ARM: MATURITY_CONCEPTUAL,
+        TECHNIQUE_NET_CAPTURE: MATURITY_FLIGHT_DEMONSTRATED,
+    }
+    for o in result:
+        if o["removal_method"] in (METHOD_NET_CAPTURE, METHOD_MONITOR_ONLY):
+            assert len(o["possible_methods"]) == 1
+            assert o["possible_methods"][0] in o["method_maturity"]
+    print("\nSanity checks passed: intact objects -> robotic_arm_or_net, fragments split by median bstar, "
+          "possible_methods/method_maturity present and consistent with removal_method on every object.")

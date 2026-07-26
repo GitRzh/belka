@@ -84,6 +84,13 @@ def parse_and_filter(raw_objects: list[dict[str, Any]], ts) -> list[dict[str, An
                     "latitude": round(_f(subpoint.latitude.degrees), 4),
                     "longitude": round(_f(subpoint.longitude.degrees), 4),
                     "bstar": float(obj.get("BSTAR", 0.0) or 0.0),
+                    # TLEs go stale fast -- accuracy degrades the further t is
+                    # from the epoch. t - sat.epoch is skyfield's own day-count
+                    # subtraction (Time.__sub__ returns a plain float number of
+                    # days), so this needs no _f() wrapper. Surfacing this lets
+                    # a reviewer see how fresh the orbital data actually is,
+                    # rather than trusting position/risk numbers as ground truth.
+                    "epoch_age_days": round(t - sat.epoch, 2),
                 })
         except Exception:
             # Skip malformed/decayed objects rather than crash the whole fetch
