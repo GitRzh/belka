@@ -36,8 +36,6 @@ build/
 .ipynb_checkpoints/
 
 # Frontend (React + Vite)
-# Not ready yet
-frontend/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
