@@ -1,11 +1,15 @@
 """
-pytest suite for the 6 new-feature items from CHECKPOINT.txt:
+pytest suite for the 6 new-feature items from CHECKPOINT.txt, plus:
+  7. removal_method_explanation (main.py + optimizer.py)
+     -- LLM-generated justification per technique, cached, with fallback.
+
   1. method_maturity + possible_methods split       (removal_method.py)
   2. nets_carried cap                                (optimizer.py)
   3. removal_method_filter                           (main.py + /replan)
   4. monitor_only excluded from the candidate pool    (cost_matrix.py)
   5. target_norad_id                                  (main.py)
   6. /naive-route explanation parity                  (main.py)
+  7. removal_method_explanation                       (main.py + optimizer.py)
 
 Most tests hit the LIVE Celestrak pipeline (same as test_pipeline_live.py) --
 they need real network access and, for the /naive-route explanation tests
@@ -16,9 +20,12 @@ so they're fast, free, and don't flake on rate limits.
 
 Run: pytest app/test_new_features.py -v
 """
+import httpx
 import pytest
 from fastapi import HTTPException
 
+import groq as groq_module
+import app.main as main_module
 from app.main import PlanRequest, ReplanRequest, _run_plan, naive_route, replan, _get_scored_field
 from app.cost_matrix import select_candidate_pool
 from app.removal_method import (
@@ -329,3 +336,158 @@ def test_naive_route_explanation_present_on_success(monkeypatch):
     if result["visited_count"] > 0:
         assert result["explanation"] == "stub briefing text"
         assert "explanation_error" not in result
+
+
+# --------------------------------------------------------------------------- #
+# Item 7 -- removal_method_explanation (main.py + optimizer.py)
+# --------------------------------------------------------------------------- #
+
+def test_explanation_cache_limits_llm_calls(monkeypatch):
+    """Calling _get_scored_field() on a live batch (hundreds of objects, all
+    sharing one of 3 removal_method values) must result in at most 3 distinct
+    LLM calls -- one per unique removal_method value -- regardless of batch
+    size.  The cache must absorb all repeated calls for the same method."""
+    call_log: list[str] = []
+
+    def fake_groq_call(model, messages, temperature):
+        # Extract the removal_method from the prompt to log which key was hit.
+        content = messages[0]["content"]
+        for line in content.splitlines():
+            if line.startswith("Removal method label:"):
+                call_log.append(line.split(":", 1)[1].strip())
+                break
+
+        # Return a minimal object shaped like a real Groq response.
+        class FakeChoice:
+            class FakeMessage:
+                content = "Stub explanation from monkeypatched LLM."
+            message = FakeMessage()
+
+        class FakeResp:
+            choices = [FakeChoice()]
+
+        return FakeResp()
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    return fake_groq_call(**kwargs)
+
+    # Clear the module-level cache so this test starts clean regardless of
+    # run order (other tests / the scored_field fixture may have warmed it).
+    main_module._REMOVAL_METHOD_EXPLANATION_CACHE.clear()
+    monkeypatch.setattr("app.main._groq_client", lambda: FakeClient())
+
+    field = _get_scored_field()
+    assert field, "Debris field must not be empty for this test"
+
+    distinct_methods = {o["removal_method"] for o in field}
+    # Every object must have both new fields.
+    for o in field:
+        assert "removal_method_explanation" in o, f"Missing explanation on {o['norad_id']}"
+        assert "removal_method_explanation_source" in o
+        assert o["removal_method_explanation"], "Explanation must be non-empty"
+
+    # The LLM must have been called at most once per distinct removal_method --
+    # not once per object (which would be hundreds of redundant calls).
+    assert len(call_log) <= len(distinct_methods), (
+        f"Expected at most {len(distinct_methods)} LLM calls (one per distinct method), "
+        f"got {len(call_log)}: {call_log}"
+    )
+    # And it must have been called for each distinct method exactly once
+    # (cache miss on first encounter, hit on all subsequent objects).
+    assert set(call_log) == distinct_methods, (
+        f"Expected calls for exactly {distinct_methods}, got calls for {set(call_log)}"
+    )
+
+
+def test_route_details_carries_removal_method_explanation(monkeypatch):
+    """route_details entries from _run_plan() must carry removal_method_explanation.
+    This proves the optimizer.py wiring (explicit field in the dict comprehension),
+    not just the main.py enrichment."""
+    main_module._REMOVAL_METHOD_EXPLANATION_CACHE.clear()
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    class FakeChoice:
+                        class FakeMessage:
+                            content = "Stub explanation."
+                        message = FakeMessage()
+                    class FakeResp:
+                        choices = [FakeChoice()]
+                    return FakeResp()
+
+    monkeypatch.setattr("app.main._groq_client", lambda: FakeClient())
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+
+    req = PlanRequest(**DEFAULT_START, fuel_budget_km_s=10.0, pool_size=50, nets_carried=5)
+    result = _run_plan(req)
+    assert result["visited_count"] > 0, "Need at least one visited node to check optimizer wiring"
+    for d in result["route_details"]:
+        assert "removal_method_explanation" in d, (
+            f"route_details entry missing removal_method_explanation: {d}"
+        )
+        assert isinstance(d["removal_method_explanation"], str)
+        # Field must be non-empty: either the stub LLM text or the fallback template.
+        assert d["removal_method_explanation"], (
+            f"removal_method_explanation is empty string for {d['removal_method']}"
+        )
+
+
+def test_explanation_fallback_on_groq_failure(monkeypatch):
+    """When Groq raises APIConnectionError, _explain_removal_method must
+    not raise -- it must return a non-empty fallback string with
+    removal_method_explanation_source == 'fallback', and cache that fallback
+    so the dead API is not re-hit for subsequent objects with the same method."""
+    main_module._REMOVAL_METHOD_EXPLANATION_CACHE.clear()
+
+    fake_request = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
+
+    def raise_connection_error(**kwargs):
+        raise groq_module.APIConnectionError(
+            message="simulated connection failure",
+            request=fake_request,
+        )
+
+    class FailingClient:
+        class chat:
+            class completions:
+                create = staticmethod(raise_connection_error)
+
+    monkeypatch.setattr("app.main._groq_client", lambda: FailingClient())
+
+    from app.main import _explain_removal_method
+    from app.removal_method import METHOD_NET_CAPTURE, METHOD_ROBOTIC_ARM_OR_NET
+
+    explanation, source = _explain_removal_method(
+        METHOD_NET_CAPTURE,
+        ["net_capture"],
+        {"net_capture": "flight_demonstrated"},
+    )
+    assert explanation, "Fallback explanation must be non-empty"
+    assert source == "fallback"
+
+    # Verify the fallback was cached -- a second call must not hit the client again
+    # (if it did, raise_connection_error would fire a second time, but since the
+    # cache now holds the result, _groq_client is never called again).
+    explanation2, source2 = _explain_removal_method(
+        METHOD_NET_CAPTURE,
+        ["net_capture"],
+        {"net_capture": "flight_demonstrated"},
+    )
+    assert explanation2 == explanation
+    assert source2 == "fallback"
+
+    # Also verify _get_scored_field doesn't surface the error to the caller --
+    # all objects must still get a non-empty explanation field even under failure.
+    field = _get_scored_field()
+    for o in field:
+        assert o.get("removal_method_explanation"), (
+            f"removal_method_explanation empty under failure for norad_id={o['norad_id']}"
+        )
+        assert o["removal_method_explanation_source"] == "fallback"

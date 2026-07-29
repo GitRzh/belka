@@ -41,6 +41,13 @@ from fastapi.middleware.cors import CORSMiddleware
 # select_candidate_pool), so it's not a legal removal_method_filter value.
 _VALID_REMOVAL_METHOD_FILTERS = {METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE}
 
+# Module-level cache for removal method explanations.  Key is removal_method
+# (bare string) -- only 3 distinct values exist from removal_method.py, so
+# this cache is bounded at 3 entries and never grows unbounded.  Cached for
+# the process lifetime: the explanation is generic to the technique, not to
+# any specific object or live orbital state, so it never needs invalidation.
+_REMOVAL_METHOD_EXPLANATION_CACHE: dict[str, tuple[str, str]] = {}
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Orbital-Clean API")
@@ -64,7 +71,16 @@ def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, f
     same object."""
     raw = get_debris_field(force_refresh=force_refresh)
     scored = score_debris_field(raw, weights=weights or DEFAULT_WEIGHTS)
-    return add_removal_methods(scored)
+    enriched = add_removal_methods(scored)
+    for obj in enriched:
+        explanation, source = _explain_removal_method(
+            obj["removal_method"],
+            obj.get("possible_methods", []),
+            obj.get("method_maturity", {}),
+        )
+        obj["removal_method_explanation"] = explanation
+        obj["removal_method_explanation_source"] = source
+    return enriched
 
 
 class PlanRequest(BaseModel):
@@ -258,6 +274,80 @@ def _groq_client() -> groq_module.Groq:
         api_key=os.environ.get("GROQ_API_KEY"),
         timeout=_GROQ_TIMEOUT,
     )
+
+
+
+def _explain_removal_method(
+    removal_method: str,
+    possible_methods: list[str],
+    method_maturity: dict[str, str],
+) -> tuple[str, str]:
+    """Return (explanation, source) for a removal_method recommendation.
+
+    source is "llm" when the Groq call succeeded, "fallback" when it failed
+    or returned nothing usable.  The explanation is cached by removal_method
+    alone: only 3 distinct values exist in removal_method.py, so the cache is
+    bounded at 3 entries and generic enough to reuse across every object with
+    the same method, never referencing a specific object or norad_id."""
+    if removal_method in _REMOVAL_METHOD_EXPLANATION_CACHE:
+        return _REMOVAL_METHOD_EXPLANATION_CACHE[removal_method]
+
+    # Build a deterministic fallback first so we always have something to
+    # cache even if the LLM call never fires.
+    maturity_summary = ", ".join(
+        f"{m} ({method_maturity.get(m, 'unknown maturity')})"
+        for m in possible_methods
+    )
+    fallback = (
+        f"Recommended technique: {removal_method.replace('_', ' ')}. "
+        f"Applicable method(s): {maturity_summary}."
+    )
+
+    prompt = (
+        "You are a technical writer for an orbital debris removal programme. "
+        "Write exactly 1-2 plain-English sentences explaining why the following "
+        "removal method is appropriate for objects of this type, referencing the "
+        "method's real-world flight status where relevant.\n\n"
+        "Ground your answer in these known facts from the programme's classification logic:\n"
+        "- net_capture is flight-demonstrated (RemoveDEBRIS 2018-2019 deployed a net successfully).\n"
+        "- robotic_arm is conceptual for uncooperative debris — no flown precedent exists "
+        "(ClearSpace-1 targets a single cooperative adapter; ELSA-M requires a pre-installed "
+        "docking plate; neither addresses tumbling uncooperative fragments).\n"
+        "- monitor_only is not a capture technique — it means the object is tracked by the "
+        "Space Surveillance Network but is too small for active removal in current missions.\n\n"
+        f"Removal method label: {removal_method}\n"
+        f"Possible technique(s): {possible_methods}\n"
+        f"Maturity per technique: {method_maturity}\n\n"
+        "Do NOT reference any specific object name, NORAD ID, or live orbital data. "
+        "Output only the 1-2 sentence explanation — no JSON, no markdown, no preamble."
+    )
+
+    try:
+        resp = _groq_client().chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if not text:
+            raise ValueError("empty response from LLM")
+        result: tuple[str, str] = (text, "llm")
+    except (groq_module.APIConnectionError, groq_module.RateLimitError) as exc:
+        logger.warning(
+            "[_explain_removal_method] Groq error for %r, using fallback: %s",
+            removal_method, exc,
+        )
+        result = (fallback, "fallback")
+    except Exception as exc:  # malformed response, ValueError from empty check, etc.
+        logger.warning(
+            "[_explain_removal_method] unexpected error for %r, using fallback: %s",
+            removal_method, exc,
+        )
+        result = (fallback, "fallback")
+
+    _REMOVAL_METHOD_EXPLANATION_CACHE[removal_method] = result
+    return result
+
 
 
 def _parse_overrides(user_text: str, req: "PlanRequest") -> dict[str, Any]:

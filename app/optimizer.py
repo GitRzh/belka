@@ -279,6 +279,7 @@ def optimize_route(
             "removal_method": o.get("removal_method", "unclassified"),
             "possible_methods": o.get("possible_methods", []),
             "method_maturity": o.get("method_maturity", {}),
+            "removal_method_explanation": o.get("removal_method_explanation", ""),
             "risk_score": round(o.get("risk_score", 0.0), 4),
             "arrival_time_days": round(arrival_time_per_pool_i.get(pool_i, 0.0), 4),
         }
