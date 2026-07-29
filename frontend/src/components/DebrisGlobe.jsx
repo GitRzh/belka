@@ -58,10 +58,12 @@ function slerpArc(a, b, steps = ARC_STEPS) {
 // from PLAN.txt is visible at a glance, not just implied by list order.
 
 function riskColor(riskScore) {
-  // riskScore assumed 0-1; red = high risk, blue = low. Adjust once we
-  // know the real distribution from a live /debris-field response.
+  // Grayscale value-only encoding (matches the rest of the UI): higher
+  // risk = brighter. Range kept off pure black/white so both ends stay
+  // visible against the (also grayscale-filtered) Earth basemap.
   const r = Math.min(1, Math.max(0, riskScore))
-  return Color.fromHsl(0.66 * (1 - r), 0.8, 0.5, 0.9)
+  const lightness = 0.35 + r * 0.55
+  return Color.fromHsl(0, 0, lightness, 0.9)
 }
 
 function riskSize(riskScore) {
@@ -144,20 +146,12 @@ export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 's
     : null
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div className="globe-viewport">
     {ageMin !== null && (
-      <div style={{
-        position: 'absolute', bottom: 8, left: 8, zIndex: 10,
-        background: 'rgba(0,0,0,0.55)', color: '#e0e0e0',
-        fontSize: 12, padding: '3px 8px', borderRadius: 4,
-        display: 'flex', alignItems: 'center', gap: 6,
-      }}>
+      <div className={`cache-chip${cacheMetadata?.data_stale ? ' cache-chip--stale' : ''}`}>
         {`Debris data: ${ageMin} min old`}
         {cacheMetadata?.data_stale && (
-          <span style={{
-            background: '#c17f24', color: '#fff',
-            fontSize: 10, padding: '1px 5px', borderRadius: 3,
-          }}>refreshing soon</span>
+          <span className="stale-tag">refreshing soon</span>
         )}
       </div>
     )}
@@ -174,8 +168,10 @@ export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 's
       {depot && (
         <Entity key="depot" position={debrisPosition(depot)} name="Depot (spacecraft start)">
           <PointGraphics
-            pixelSize={14}
-            color={Color.CYAN.withAlpha(0.95)}
+            pixelSize={16}
+            color={Color.WHITE}
+            outlineColor={Color.BLACK}
+            outlineWidth={2}
           />
         </Entity>
       )}
@@ -205,7 +201,7 @@ export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 's
             material={
               routeStyle === 'solid'
                 ? Color.WHITE
-                : new PolylineDashMaterialProperty({ color: Color.YELLOW.withAlpha(0.8), dashLength: 16 })
+                : new PolylineDashMaterialProperty({ color: Color.fromCssColorString('#8A8A8E').withAlpha(0.85), dashLength: 16 })
             }
           />
         </Entity>

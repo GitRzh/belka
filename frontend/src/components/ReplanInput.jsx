@@ -14,9 +14,10 @@ export default function ReplanInput({ onReplan, submitting, disabled, replanResu
   const explanation = replanResult?.explanation
 
   return (
-    <div>
+    <div className="replan">
+      <h3>Replan</h3>
       <form onSubmit={handleSubmit}>
-        <label>
+        <label className="field">
           Adjust the plan
           <input
             type="text"
@@ -26,18 +27,18 @@ export default function ReplanInput({ onReplan, submitting, disabled, replanResu
             disabled={disabled}
           />
         </label>
-        <button type="submit" disabled={disabled || submitting}>
+        <button type="submit" className="btn btn-primary" disabled={disabled || submitting}>
           {submitting ? 'Replanning…' : 'Replan'}
         </button>
       </form>
 
       {replanResult && (
-        <div style={{ marginTop: 12, fontSize: 13 }}>
-          {explanation && <p style={{ marginBottom: 6 }}>{explanation}</p>}
+        <div className="replan-result">
+          {explanation && <p className="explanation">{explanation}</p>}
 
           {overrides && Object.keys(overrides).length > 0 && (
-            <div style={{ marginBottom: 6 }}>
-              <strong>Overrides applied:</strong>{' '}
+            <div className="overrides">
+              Overrides applied:{' '}
               {Object.entries(overrides)
                 .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
                 .join(', ')}
@@ -45,7 +46,7 @@ export default function ReplanInput({ onReplan, submitting, disabled, replanResu
           )}
 
           {diff && (
-            <dl style={{ margin: 0 }}>
+            <dl>
               {diff.added?.length > 0 && (
                 <><dt>Added stops</dt><dd>{diff.added.join(', ')}</dd></>
               )}

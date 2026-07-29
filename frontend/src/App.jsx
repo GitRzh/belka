@@ -3,6 +3,7 @@ import DebrisGlobe from './components/DebrisGlobe.jsx'
 import PlanForm from './components/PlanForm.jsx'
 import ReasoningPanel from './components/ReasoningPanel.jsx'
 import ReplanInput from './components/ReplanInput.jsx'
+import MissionClock from './components/MissionClock.jsx'
 import { api } from './api.js'
 
 export default function App() {
@@ -86,35 +87,61 @@ export default function App() {
   const activePlan = routeMode === 'ai' ? plan : naivePlan
 
   if (debrisFieldError) {
-    return <p>Failed to load debris field: {debrisFieldError}</p>
+    return (
+      <div className="app-shell">
+        <div className="panel error-panel" style={{ margin: 24 }}>
+          Failed to load debris field: {debrisFieldError}
+        </div>
+      </div>
+    )
   }
 
   return (
-    <div style={{ display: 'flex', height: '100%' }}>
-      <div style={{ flex: 1 }}>
-        <DebrisGlobe
-          debrisField={debrisField}
-          route={activePlan?.route}
-          depot={activePlan?.depot}
-          routeStyle={routeMode === 'ai' ? 'solid' : 'dashed'}
-          cacheMetadata={cacheMetadata}
-        />
-      </div>
+    <div className="app-shell">
+      <header className="mission-header">
+        <div className="wordmark">
+          Orbital<span className="wordmark-dim">–</span>Clean
+        </div>
+        <div className="header-meta">
+          <span className="status-chip">{debrisField.length} objects tracked</span>
+          <span className="header-divider" />
+          <MissionClock />
+        </div>
+      </header>
 
-      <div style={{ width: 380, overflowY: 'auto', padding: 16 }}>
-        <PlanForm onSubmit={handleGeneratePlan} submitting={planning} />
+      <div className="app-body">
+        <div className="globe-pane reticle">
+          <DebrisGlobe
+            debrisField={debrisField}
+            route={activePlan?.route}
+            depot={activePlan?.depot}
+            routeStyle={routeMode === 'ai' ? 'solid' : 'dashed'}
+            cacheMetadata={cacheMetadata}
+          />
+        </div>
 
-        {formError && <p role="alert">{formError}</p>}
+        <aside className="control-column">
+          <section className="panel reticle">
+            <h2 className="panel-title">Mission parameters</h2>
+            <PlanForm onSubmit={handleGeneratePlan} submitting={planning} />
+          </section>
 
-        {plan && (
-          <button onClick={handleToggleNaive}>
-            {routeMode === 'ai' ? 'Show naive route' : 'Show AI route'}
-          </button>
-        )}
+          {formError && <div className="panel error-panel" role="alert">{formError}</div>}
 
-        <ReasoningPanel plan={activePlan} />
+          {plan && (
+            <button className="btn btn-toggle" onClick={handleToggleNaive}>
+              {routeMode === 'ai' ? 'Show naive route' : 'Show AI route'}
+            </button>
+          )}
 
-        <ReplanInput onReplan={handleReplan} submitting={replanning} disabled={!plan} replanResult={replanResult} />
+          <section className="panel reticle">
+            <ReasoningPanel plan={activePlan} />
+          </section>
+
+          <section className="panel reticle">
+            <ReplanInput onReplan={handleReplan} submitting={replanning} disabled={!plan} replanResult={replanResult} />
+          </section>
+        </aside>
       </div>
     </div>
   )

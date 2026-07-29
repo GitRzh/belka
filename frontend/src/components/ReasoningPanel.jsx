@@ -6,15 +6,17 @@ export default function ReasoningPanel({ plan }) {
   if (!plan) return null
 
   return (
-    <div>
+    <div className="reasoning">
       <h3>Reasoning</h3>
 
-      {plan.warning && <p role="alert">Warning: {plan.warning}</p>}
+      {plan.warning && <p className="warning" role="alert">Warning: {plan.warning}</p>}
 
       {plan.explanation ? (
-        <p>{plan.explanation}</p>
+        <p className="explanation">{plan.explanation}</p>
       ) : (
-        <p>Explanation unavailable{plan.explanation_error ? ` (${plan.explanation_error})` : ''}.</p>
+        <p className="explanation">
+          Explanation unavailable{plan.explanation_error ? ` (${plan.explanation_error})` : ''}.
+        </p>
       )}
 
       <dl>
@@ -42,22 +44,23 @@ export default function ReasoningPanel({ plan }) {
       {plan.step_breakdown?.length > 0 && (
         <details>
           <summary>Step-by-step breakdown</summary>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginTop: 6 }}>
+          <table className="manifest-table">
             <thead>
               <tr>
-                {['From', 'To', 'Δv (km/s)', 'Arrival (days)', 'RAAN drift (°)'].map((h) => (
-                  <th key={h} style={{ textAlign: 'left', borderBottom: '1px solid #555', padding: '2px 4px' }}>{h}</th>
+                {['Leg', 'From', 'To', 'Δv (km/s)', 'Arrival (days)', 'RAAN drift (°)'].map((h) => (
+                  <th key={h}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {plan.step_breakdown.map((step, i) => (
-                <tr key={i} style={{ borderBottom: '1px solid #333' }}>
-                  <td style={{ padding: '2px 4px' }}>{step.from}</td>
-                  <td style={{ padding: '2px 4px' }}>{step.to}</td>
-                  <td style={{ padding: '2px 4px' }}>{step.delta_v_km_s}</td>
-                  <td style={{ padding: '2px 4px' }}>{step.arrival_time_days ?? '—'}</td>
-                  <td style={{ padding: '2px 4px' }}>{step.raan_drift_deg ?? '—'}</td>
+                <tr key={i}>
+                  <td className="leg-index">{String(i + 1).padStart(2, '0')}</td>
+                  <td>{step.from}</td>
+                  <td>{step.to}</td>
+                  <td>{step.delta_v_km_s}</td>
+                  <td>{step.arrival_time_days ?? '—'}</td>
+                  <td>{step.raan_drift_deg ?? '—'}</td>
                 </tr>
               ))}
             </tbody>

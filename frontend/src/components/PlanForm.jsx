@@ -62,8 +62,8 @@ export default function PlanForm({ onSubmit, submitting }) {
   }
 
   return (
-    <form onSubmit={handleSubmit}>
-      <label>
+    <form className="mission-form" onSubmit={handleSubmit}>
+      <label className="field">
         Start altitude (km)
         <input
           type="number"
@@ -73,7 +73,7 @@ export default function PlanForm({ onSubmit, submitting }) {
         />
       </label>
 
-      <label>
+      <label className="field">
         Start inclination (deg)
         <input
           type="number"
@@ -83,7 +83,7 @@ export default function PlanForm({ onSubmit, submitting }) {
         />
       </label>
 
-      <label>
+      <label className="field">
         Fuel budget (km/s)
         <input
           type="number"
@@ -94,13 +94,13 @@ export default function PlanForm({ onSubmit, submitting }) {
         />
       </label>
 
-      <button type="button" onClick={() => setAdvancedOpen((o) => !o)}>
+      <button type="button" className="btn" onClick={() => setAdvancedOpen((o) => !o)}>
         {advancedOpen ? 'Hide advanced options' : 'Advanced options'}
       </button>
 
       {advancedOpen && (
         <fieldset>
-          <label>
+          <label className="field">
             Pool size
             <input
               type="number"
@@ -109,7 +109,7 @@ export default function PlanForm({ onSubmit, submitting }) {
             />
           </label>
 
-          <label>
+          <label className="field">
             Risk penalty scale
             <input
               type="number"
@@ -119,7 +119,7 @@ export default function PlanForm({ onSubmit, submitting }) {
             />
           </label>
 
-          <label>
+          <label className="field">
             Nets carried
             <input
               type="number"
@@ -128,7 +128,7 @@ export default function PlanForm({ onSubmit, submitting }) {
             />
           </label>
 
-          <label>
+          <label className="field">
             Removal method filter
             <select
               value={advanced.removal_method_filter}
@@ -142,7 +142,7 @@ export default function PlanForm({ onSubmit, submitting }) {
             </select>
           </label>
 
-          <label>
+          <label className="field">
             Target NORAD ID
             <input
               type="text"
@@ -151,7 +151,7 @@ export default function PlanForm({ onSubmit, submitting }) {
             />
           </label>
 
-          <label>
+          <label className="field">
             Start RAAN (deg)
             <input
               type="number"
@@ -163,7 +163,7 @@ export default function PlanForm({ onSubmit, submitting }) {
             />
           </label>
 
-          <label>
+          <label className="field">
             Weights (raw JSON)
             <textarea
               value={advanced.weights_json}
@@ -174,7 +174,7 @@ export default function PlanForm({ onSubmit, submitting }) {
         </fieldset>
       )}
 
-      <button type="submit" disabled={submitting}>
+      <button type="submit" className="btn btn-primary" disabled={submitting}>
         {submitting ? 'Generating…' : 'Generate Plan'}
       </button>
     </form>

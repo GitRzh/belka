@@ -32,6 +32,7 @@ def _f(x: object) -> float:
     return float(x)  # pyright: ignore[reportArgumentType]
 
 CELESTRAK_BASE = "https://celestrak.org/NORAD/elements/gp.php"
+CELESTRAK_SATCAT_BASE = "https://celestrak.org/satcat/records.php"
 DEBRIS_GROUPS = ["cosmos-2251-debris", "iridium-33-debris", "fengyun-1c-debris"]
 
 ALT_MIN_KM = 700
@@ -63,6 +64,36 @@ def fetch_group_tles(group: str) -> list[dict[str, Any]]:
     resp = requests.get(url, timeout=15)
     resp.raise_for_status()
     return resp.json()
+
+
+def fetch_group_satcat(group: str) -> dict[int, float | None]:
+    """Fetch SATCAT records for one debris group and return a mapping of
+    NORAD_CAT_ID -> RCS (m², float) or None for objects where RCS is
+    null/missing/empty.  Uses the same GROUP parameter accepted by the GP
+    endpoint so no separate ID list is needed."""
+    url = f"{CELESTRAK_SATCAT_BASE}?GROUP={group}&FORMAT=JSON"
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    records: list[dict[str, Any]] = resp.json()
+    result: dict[int, float | None] = {}
+    for rec in records:
+        norad_id = rec.get("NORAD_CAT_ID")
+        if norad_id is None:
+            continue
+        rcs_raw = rec.get("RCS")
+        # RCS may be absent, null (JSON null → None), an empty string, or a
+        # valid float.  Treat anything that isn't a real positive number as None
+        # rather than 0 — a zero RCS is physically meaningless for debris and
+        # would silently distort min-max normalisation in risk_score.py.
+        rcs: float | None = None
+        if rcs_raw is not None and rcs_raw != "":
+            try:
+                parsed = float(rcs_raw)
+                rcs = parsed if parsed > 0.0 else None
+            except (ValueError, TypeError):
+                rcs = None
+        result[int(norad_id)] = rcs
+    return result
 
 
 def parse_and_filter(raw_objects: list[dict[str, Any]], ts) -> list[dict[str, Any]]:
@@ -127,6 +158,24 @@ def get_debris_field(force_refresh: bool = False) -> list[dict[str, Any]]:
         capped_group = filtered_group[:PER_GROUP_MAX_OBJECTS]
         result.extend(capped_group)
         print(f"[fetch] {group}: {len(filtered_group)} in band, kept {len(capped_group)} (cap={PER_GROUP_MAX_OBJECTS})")
+
+    # Join SATCAT RCS data.  Fetch all groups into a single norad_id -> rcs_m2
+    # map, then annotate every object before writing the cache so subsequent
+    # cache hits include RCS without a second network round-trip.
+    rcs_map: dict[int, float | None] = {}
+    for group in DEBRIS_GROUPS:
+        try:
+            rcs_map.update(fetch_group_satcat(group))
+        except Exception as exc:
+            # SATCAT is optional enrichment — don't abort the whole fetch if it
+            # fails (e.g. rate-limit, schema change).  Objects will get None.
+            print(f"[satcat] Warning: could not fetch SATCAT for {group}: {exc}")
+
+    for obj in result:
+        obj["rcs_m2"] = rcs_map.get(obj["norad_id"])  # None if not found
+
+    rcs_count = sum(1 for o in result if o["rcs_m2"] is not None)
+    print(f"[satcat] RCS coverage: {rcs_count}/{len(result)} objects have non-null rcs_m2")
 
     with open(CACHE_FILE, "w") as f:
         json.dump(result, f)
