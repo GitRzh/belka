@@ -586,7 +586,7 @@ def replan(req: ReplanRequest):
 
 
 @app.get("/naive-route")
-def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_budget_km_s: float, pool_size: int = DEFAULT_POOL_SIZE):
+def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_budget_km_s: float, pool_size: int = DEFAULT_POOL_SIZE, start_raan_deg: float = 0.0):
     """Nearest-neighbor baseline for the naive-vs-AI comparison (Week 5 Day 35).
     Greedy: always hop to whatever's cheapest next, ignore risk entirely,
     stop once the next hop would blow the budget. This is the strawman the
@@ -596,7 +596,7 @@ def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_bud
 
     from app.cost_matrix import build_cost_matrix
 
-    depot = {"norad_id": -1, "name": "DEPOT (spacecraft start)", "altitude_km": start_altitude_km, "inclination_deg": start_inclination_deg, "risk_score": 0.0}
+    depot = {"norad_id": -1, "name": "DEPOT (spacecraft start)", "altitude_km": start_altitude_km, "inclination_deg": start_inclination_deg, "raan_deg": start_raan_deg, "risk_score": 0.0}
     nodes = [depot] + pool
     matrix = build_cost_matrix(nodes)
 
@@ -655,4 +655,17 @@ def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_bud
             "Mission briefing generation failed or was rate-limited. "
             "Route data above is valid; retry to get a narrated briefing."
         )
+
+    # Echo depot so the frontend can draw the depot marker and the
+    # depot->first-hop leg -- same shape and same convention as /plan's
+    # result["depot"] block in _run_plan().  latitude/longitude default to
+    # 0.0 (equatorial crossing): we only have orbital elements from the
+    # query params, not a real ground-track position.
+    result["depot"] = {
+        "altitude_km": start_altitude_km,
+        "inclination_deg": start_inclination_deg,
+        "raan_deg": start_raan_deg,
+        "latitude": 0.0,
+        "longitude": 0.0,
+    }
     return result

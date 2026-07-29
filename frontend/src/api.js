@@ -39,6 +39,10 @@ export const api = {
       start_altitude_km: params.start_altitude_km,
       start_inclination_deg: params.start_inclination_deg,
       fuel_budget_km_s: params.fuel_budget_km_s,
+      // start_raan_deg is optional in PlanForm (left blank → omitted from
+      // lastPlanRequest payload). Only send it when present so the backend
+      // falls back to its own default (0.0) rather than receiving "undefined".
+      ...(params.start_raan_deg != null ? { start_raan_deg: params.start_raan_deg } : {}),
       ...(params.pool_size != null ? { pool_size: params.pool_size } : {}),
     }).toString()
     return request(`/naive-route?${qs}`)
