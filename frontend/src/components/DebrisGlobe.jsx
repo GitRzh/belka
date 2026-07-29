@@ -2,6 +2,57 @@ import { useState, useEffect } from 'react'
 import { Viewer, Entity, PolylineGraphics, PointGraphics } from 'resium'
 import { Cartesian3, Color, PolylineDashMaterialProperty } from 'cesium'
 
+// Spherical linear interpolation between two Cartesian3 positions.
+// Returns `steps` points from `a` up to (but not including) `b`.
+// Each point's radius is linearly interpolated between rA and rB so that:
+//   - t=0 lands exactly on `a` (not on the mean-altitude shell)
+//   - intermediate points track the true orbital altitude gradient
+//   - junction points between consecutive legs align with the debris position
+// The caller appends `b` once at the end of the full arc chain.
+const ARC_STEPS = 10
+function slerpArc(a, b, steps = ARC_STEPS) {
+  const rA = Cartesian3.magnitude(a)
+  const rB = Cartesian3.magnitude(b)
+
+  // Unit vectors along each endpoint direction.
+  const uA = Cartesian3.normalize(a, new Cartesian3())
+  const uB = Cartesian3.normalize(b, new Cartesian3())
+
+  // Angle between the two unit vectors (clamped to avoid NaN from fp drift).
+  const dot = Math.min(1, Math.max(-1, Cartesian3.dot(uA, uB)))
+  const omega = Math.acos(dot)
+
+  // Use lerp fallback when points are effectively coincident (omega ≈ 0) OR
+  // antipodal (omega ≈ π) — both cases make sinOmega → 0 and would divide
+  // the slerp scale factors by near-zero, blowing up or producing NaN.
+  const NEAR_ZERO = 1e-10
+  const useLinear = omega < NEAR_ZERO || omega > Math.PI - NEAR_ZERO
+
+  const points = []
+  for (let i = 0; i < steps; i++) {
+    const t = i / steps
+    let dir
+    if (useLinear) {
+      // Linear blend of unit vectors; normalise to get direction.
+      dir = Cartesian3.lerp(uA, uB, t, new Cartesian3())
+    } else {
+      // Classic slerp: sin((1-t)ω)/sin(ω)·uA + sin(tω)/sin(ω)·uB
+      const sinOmega = Math.sin(omega)
+      const scaleA = Math.sin((1 - t) * omega) / sinOmega
+      const scaleB = Math.sin(t * omega) / sinOmega
+      const scaledA = Cartesian3.multiplyByScalar(uA, scaleA, new Cartesian3())
+      const scaledB = Cartesian3.multiplyByScalar(uB, scaleB, new Cartesian3())
+      dir = Cartesian3.add(scaledA, scaledB, new Cartesian3())
+    }
+    // Interpolate radius linearly between rA and rB so t=0 lands exactly on
+    // `a` (not on the mean-altitude shell), keeping junction points accurate.
+    Cartesian3.normalize(dir, dir)
+    const r = rA + t * (rB - rA)
+    points.push(Cartesian3.multiplyByScalar(dir, r, new Cartesian3()))
+  }
+  return points
+}
+
 // Unstyled/functional per Week 5 plan — polish comes later.
 // Debris dots are colored/sized by risk_score so the "risk-ranked" framing
 // from PLAN.txt is visible at a glance, not just implied by list order.
@@ -61,7 +112,7 @@ export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 's
   // Resolve each route label to a Cesium position.  Depot is prepended so the
   // depot -> first-debris leg actually draws; without it the polyline only
   // connects debris-to-debris and the first leg is missing.
-  const routePositions = route?.length
+  const stopPositions = route?.length
     ? [
         ...(depot ? [debrisPosition(depot)] : []),
         ...route
@@ -71,6 +122,18 @@ export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 's
           .map(debrisPosition),
       ]
     : null
+
+  // Expand consecutive stop pairs into smooth arcs via slerp.
+  // Each leg contributes ARC_STEPS intermediate points; the final stop is
+  // appended once at the end so no position is duplicated.
+  const routePositions = stopPositions?.length >= 2
+    ? [
+        ...stopPositions.slice(0, -1).flatMap((pos, i) =>
+          slerpArc(pos, stopPositions[i + 1])
+        ),
+        stopPositions[stopPositions.length - 1],
+      ]
+    : stopPositions
 
   // Built once per render from the same noradIdFromRouteLabel() parse used
   // above. null (not an empty Set) when there's no route, so the visitedIds
