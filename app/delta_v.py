@@ -12,23 +12,25 @@ another's:
 1. Altitude change — closed-form Hohmann transfer delta-v. Cheap, well
    understood, two burns (leave circular orbit 1, arrive circular orbit 2).
 
-2. Inclination change — the expensive one. Changing an orbital plane costs
+2. Plane change — the expensive one. Changing an orbital plane costs
    delta-v proportional to the velocity you're carrying when you do it, so
    the same plane change is far cheaper done slowly at a high, low-velocity
    orbit than snapped at a low, fast one. This is why real missions (e.g.
    GTO -> GEO insertion) bundle the plane change into the burn at apogee
    instead of doing it separately.
 
+   RAAN UPDATE: "plane change" is now computed as the true relative angle
+   between two orbital planes -- combining inclination AND RAAN (right
+   ascension of ascending node) via the spherical law of cosines -- rather
+   than the earlier |incl1 - incl2| approximation. Two objects can share an
+   inclination but sit in completely different planes (different RAAN);
+   the old approximation understated cost for exactly those pairs. RAAN is
+   now parsed by tle_fetch.py (sat.model.nodeo), so this is no longer a
+   blocked/deferred fix.
+
 SIMPLIFYING ASSUMPTIONS (stated up front, not hidden):
 - Orbits are treated as circular (fine for debris tracking data, which
-  gives us altitude/inclination, not full osculating elements).
-- "Inclination change" uses |incl1 - incl2| only. A fully rigorous plane
-  change also depends on the relative RAAN (right ascension of ascending
-  node) between the two orbits -- two objects can share an inclination but
-  sit in completely different planes. tle_fetch's get_debris_field() does
-  not currently return RAAN, so this is a known first-cut approximation:
-  it will UNDERSTATE cost for same-inclination-different-RAAN pairs. Worth
-  a note in the writeup; not blocking for a hackathon-scope router.
+  gives us altitude/inclination/RAAN, not full osculating elements).
 - Combined maneuver: the plane change is bundled entirely into whichever
   burn happens at the orbit with the LOWER circular velocity (i.e. the
   higher of the two altitudes), because that's where a plane change is
@@ -36,6 +38,16 @@ SIMPLIFYING ASSUMPTIONS (stated up front, not hidden):
   -> GEO insertions do) rather than a numerically-optimized split across
   both burns. Optimal splitting exists in the literature but adds real
   complexity for a small further saving -- not worth it here.
+- RAAN DRIFT (J2 secular nodal regression): raan_drift_deg() below
+  gives the closed-form secular drift of a target's RAAN over elapsed
+  time, so optimizer.py can project a target's RAAN forward to the
+  predicted arrival time instead of using the fetch-time snapshot.
+  This is NOT full orbital propagation -- it captures only the dominant
+  secular J2 term (the same term that makes sun-synchronous orbits work).
+- STILL NOT MODELED: true-anomaly phasing (will the spacecraft and the
+  debris actually be in the same place at the same time within the
+  matched orbital plane). That requires a separate rendezvous analysis
+  and is explicitly out of scope for now.
 """
 import math
 
@@ -43,8 +55,41 @@ MU_EARTH_KM3_S2 = 398600.4418   # Earth's gravitational parameter, mu = GM
 R_EARTH_KM = 6378.137           # WGS84 equatorial radius -- altitude_km from
                                  # tle_fetch is geodetic elevation, so this is
                                  # the right reference radius to add it to.
-
+J2 = 0.00108263                  # Earth's second zonal harmonic coefficient
 SAME_ALTITUDE_TOLERANCE_KM = 1.0  # below this, treat as a pure plane change
+
+
+def raan_drift_deg(altitude_km: float, inclination_deg: float, elapsed_days: float) -> float:
+    """
+    Secular RAAN drift (degrees) due to J2 nodal regression over elapsed_days.
+
+    Standard closed-form formula for the secular nodal regression rate:
+
+        dΩ/dt = -1.5 * n * J2 * (Re / p)^2 * cos(i)
+
+    where:
+        n  = mean motion  = sqrt(mu / a^3)  [rad/s]
+        a  = semi-major axis = Re + altitude_km
+        p  = semi-latus rectum = a  (circular orbit, e=0, so p = a)
+        Re = 6378.137 km
+        J2 = 0.00108263
+
+    Returns a signed float (negative for prograde orbits, i.e. inclination < 90 deg;
+    positive for retrograde). Callers should add this to a fetch-time RAAN to get
+    the projected RAAN at arrival.
+
+    elapsed_days can be fractional. Returns 0.0 immediately if elapsed_days <= 0
+    so callers don't need to guard against it.
+    """
+    if elapsed_days <= 0.0:
+        return 0.0
+    a_km = R_EARTH_KM + altitude_km
+    n_rad_s = math.sqrt(MU_EARTH_KM3_S2 / a_km**3)          # mean motion, rad/s
+    p_km = a_km                                               # circular: p = a
+    rate_rad_s = -1.5 * n_rad_s * J2 * (R_EARTH_KM / p_km)**2 * math.cos(math.radians(inclination_deg))
+    elapsed_seconds = elapsed_days * 86400.0
+    drift_rad = rate_rad_s * elapsed_seconds
+    return math.degrees(drift_rad)
 
 
 def circular_velocity(r_km: float) -> float:
@@ -57,16 +102,48 @@ def _vis_viva(r_km: float, a_km: float) -> float:
     return math.sqrt(MU_EARTH_KM3_S2 * (2.0 / r_km - 1.0 / a_km))
 
 
+def relative_plane_angle(
+    incl1_deg: float,
+    raan1_deg: float,
+    incl2_deg: float,
+    raan2_deg: float,
+) -> float:
+    """
+    True angle (deg) between two orbital planes, combining inclination AND
+    RAAN via the spherical law of cosines:
+
+        cos(theta) = cos(i1)*cos(i2) + sin(i1)*sin(i2)*cos(RAAN1 - RAAN2)
+
+    This replaces the old |incl1 - incl2| approximation. That approximation
+    is actually the special case of this formula when RAAN1 == RAAN2 (cos(0)
+    = 1 makes the two reduce to the same value) -- so this is a strict
+    generalization, not a different model; it agrees with the old numbers
+    exactly when RAAN happens to match, and only diverges (correctly) when
+    it doesn't.
+    """
+    i1 = math.radians(incl1_deg)
+    i2 = math.radians(incl2_deg)
+    d_raan = math.radians(raan1_deg - raan2_deg)
+
+    cos_theta = math.cos(i1) * math.cos(i2) + math.sin(i1) * math.sin(i2) * math.cos(d_raan)
+    cos_theta = max(-1.0, min(1.0, cos_theta))  # clamp: guards against float noise pushing just past +-1
+    return math.degrees(math.acos(cos_theta))
+
+
 def plane_change_delta_v(v_km_s: float, delta_i_deg: float) -> float:
     """Cost of a pure plane change (no altitude change) at circular
-    velocity v_km_s. Delta-v = 2 * v * sin(delta_i / 2)."""
+    velocity v_km_s. Delta-v = 2 * v * sin(delta_i / 2).
+    delta_i_deg here is the TRUE relative plane angle (see
+    relative_plane_angle()), not a raw inclination difference."""
     delta_i_rad = math.radians(delta_i_deg)
     return 2.0 * v_km_s * math.sin(delta_i_rad / 2.0)
 
 
 def combined_burn_delta_v(v1_km_s: float, v2_km_s: float, delta_i_deg: float) -> float:
     """Cost of changing speed AND plane in a single burn (law of cosines
-    on the velocity vectors). Reduces to |v1 - v2| when delta_i_deg = 0."""
+    on the velocity vectors). Reduces to |v1 - v2| when delta_i_deg = 0.
+    delta_i_deg here is the TRUE relative plane angle (see
+    relative_plane_angle()), not a raw inclination difference."""
     delta_i_rad = math.radians(delta_i_deg)
     val = v1_km_s**2 + v2_km_s**2 - 2.0 * v1_km_s * v2_km_s * math.cos(delta_i_rad)
     return math.sqrt(max(val, 0.0))  # clamp: guards against -1e-16 float noise at delta_i=0
@@ -97,19 +174,29 @@ def transfer_delta_v(
     incl1_deg: float,
     alt2_km: float,
     incl2_deg: float,
+    raan1_deg: float = 0.0,
+    raan2_deg: float = 0.0,
 ) -> dict[str, float]:
     """
     Main entry point: total delta-v (km/s) to move a spacecraft from one
-    debris object's orbit to another's, given altitude (km above surface)
-    and inclination (deg) for each. This is what fills the N x N cost
-    matrix in step 2.
+    debris object's orbit to another's, given altitude (km above surface),
+    inclination (deg), and RAAN (deg) for each. This is what fills the
+    N x N cost matrix in step 2.
+
+    raan1_deg/raan2_deg default to 0.0 for backward compatibility with
+    callers that don't have RAAN yet (e.g. the mission depot node, which
+    has no orbital RAAN of its own until a start_raan_deg is threaded
+    through from the request). Passing 0.0 for both is equivalent to the
+    OLD |incl1 - incl2| behavior -- it's a safe fallback, not silently
+    wrong, but it re-introduces the RAAN blind spot for that specific pair
+    until real RAAN values are supplied on both sides.
 
     Bundles the plane change into the burn at the higher-altitude
     (lower-velocity) orbit -- see module docstring for why.
     """
     r1 = R_EARTH_KM + alt1_km
     r2 = R_EARTH_KM + alt2_km
-    delta_i = abs(incl1_deg - incl2_deg)
+    delta_i = relative_plane_angle(incl1_deg, raan1_deg, incl2_deg, raan2_deg)
     altitude_change_km = abs(alt2_km - alt1_km)
 
     # Reference-only figure: what it WOULD cost to do the plane change
@@ -129,7 +216,8 @@ def transfer_delta_v(
             "delta_v_burn_lo_km_s": 0.0,
             "delta_v_burn_hi_km_s": total,
             "altitude_change_km": altitude_change_km,
-            "inclination_change_deg": delta_i,
+            "inclination_change_deg": abs(incl1_deg - incl2_deg),  # raw diff, informational only
+            "relative_plane_angle_deg": delta_i,  # actual value used in the physics above
             "naive_separate_maneuver_km_s": naive_plane_change,
         }
 
@@ -151,7 +239,8 @@ def transfer_delta_v(
         "delta_v_burn_lo_km_s": dv_lo,
         "delta_v_burn_hi_km_s": dv_hi,
         "altitude_change_km": altitude_change_km,
-        "inclination_change_deg": delta_i,
+        "inclination_change_deg": abs(incl1_deg - incl2_deg),  # raw diff, informational only
+        "relative_plane_angle_deg": delta_i,  # actual value used in the physics above
         "naive_separate_maneuver_km_s": dv_lo + naive_plane_change,
     }
 
@@ -194,6 +283,8 @@ if __name__ == "__main__":
         print(f"  {k}: {v:.4f}")
     print("  (Small difference from Check 3 is expected -- this treats the GTO 'departure' side as")
     print("   its own circular-orbit burn too, rather than assuming a free launch injection.)")
+    print("  (RAAN defaults to 0.0 for both here, so relative_plane_angle_deg == inclination_change_deg")
+    print("   -- this check exercises the backward-compatible path, same numbers as before.)")
 
     print("\n=== Check 5: sanity check on debris-realistic numbers (700-1000km band) ===")
     d1 = transfer_delta_v(alt1_km=780.0, incl1_deg=74.0, alt2_km=820.0, incl2_deg=74.05)
@@ -201,3 +292,15 @@ if __name__ == "__main__":
     d2 = transfer_delta_v(alt1_km=780.0, incl1_deg=74.0, alt2_km=820.0, incl2_deg=98.0)
     print(f"  Same-ish altitude, large inclination diff (74 -> 98 deg): total delta-v = {d2['delta_v_total_km_s']:.4f} km/s (should be expensive)")
     print(f"    naive (separate maneuvers) would cost: {d2['naive_separate_maneuver_km_s']:.4f} km/s -- combined maneuver saves {d2['naive_separate_maneuver_km_s'] - d2['delta_v_total_km_s']:.4f} km/s")
+
+    print("\n=== Check 6 (NEW): RAAN actually changes the answer ===")
+    print("    Same inclination pair both sides, but RAAN differs -- old model would")
+    print("    have called these two cases IDENTICAL (both see incl diff = 0deg).")
+    same_raan = transfer_delta_v(alt1_km=800.0, incl1_deg=74.0, raan1_deg=10.0,
+                                  alt2_km=800.0, incl2_deg=74.0, raan2_deg=10.0)
+    diff_raan = transfer_delta_v(alt1_km=800.0, incl1_deg=74.0, raan1_deg=10.0,
+                                  alt2_km=800.0, incl2_deg=74.0, raan2_deg=130.0)
+    print(f"  Same inclination, SAME RAAN:      relative_plane_angle = {same_raan['relative_plane_angle_deg']:.4f} deg, delta-v = {same_raan['delta_v_total_km_s']:.4f} km/s (should be ~0, true same-plane hop)")
+    print(f"  Same inclination, DIFFERENT RAAN: relative_plane_angle = {diff_raan['relative_plane_angle_deg']:.4f} deg, delta-v = {diff_raan['delta_v_total_km_s']:.4f} km/s (should be large -- this is the case the old model got wrong)")
+    assert diff_raan["delta_v_total_km_s"] > same_raan["delta_v_total_km_s"], "RAAN should matter when inclination is identical!"
+    print("  RAAN correctly distinguishes same-inclination-different-plane pairs: OK")

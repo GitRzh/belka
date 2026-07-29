@@ -15,6 +15,7 @@ import json
 import os
 import tempfile
 import time
+from datetime import datetime, timezone
 from typing import Any
 from skyfield.api import EarthSatellite, load, wgs84
 
@@ -81,6 +82,13 @@ def parse_and_filter(raw_objects: list[dict[str, Any]], ts) -> list[dict[str, An
                     "name": obj.get("OBJECT_NAME", "UNKNOWN"),
                     "altitude_km": round(alt_km, 2),
                     "inclination_deg": round(_f(sat.model.inclo) * 57.29577951308232, 4),
+                    # RAAN (right ascension of ascending node) -- was previously
+                    # parsed by skyfield/sgp4 (sat.model.nodeo) but discarded.
+                    # Needed so delta_v.py can compute the true relative angle
+                    # between two orbital planes instead of assuming two
+                    # objects with the same inclination sit in the same plane.
+                    # Same source, same units-conversion pattern as inclo above.
+                    "raan_deg": round(_f(sat.model.nodeo) * 57.29577951308232, 4),
                     "latitude": round(_f(subpoint.latitude.degrees), 4),
                     "longitude": round(_f(subpoint.longitude.degrees), 4),
                     "bstar": float(obj.get("BSTAR", 0.0) or 0.0),
@@ -125,6 +133,14 @@ def get_debris_field(force_refresh: bool = False) -> list[dict[str, Any]]:
     print(f"[cache] Fetched fresh from Celestrak, cached {len(result)} objects")
 
     return result
+
+
+def get_cache_timestamp() -> str:
+    """Returns ISO 8601 UTC timestamp of when CACHE_FILE was last written.
+    Assumes get_debris_field() has been called at least once already
+    (CACHE_FILE exists)."""
+    mtime = os.path.getmtime(CACHE_FILE)
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
 
 
 if __name__ == "__main__":

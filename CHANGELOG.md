@@ -286,3 +286,89 @@ Modules touched: 0 (docs only)
   pre-installed docking plate); no collision/conjunction (CDM) screening
   performed, disclosed as a real operational step this tool doesn't
   model.
+
+## Cache freshness display (GET /debris-field)
+
+Modules touched: 2 (A, C) + frontend
+
+- Module A — added get_cache_timestamp(), returning the debris cache
+  file's mtime as an ISO 8601 UTC timestamp. Companion to the existing
+  get_debris_field(), no change to that function's signature or return
+  type.
+- Module C — /debris-field's response shape changed from a bare list to
+  a wrapped object: {debris_field, data_fetched_at, data_stale}.
+  data_stale is true when cache age is within 10 minutes of
+  CACHE_MAX_AGE_SECONDS (2hr), i.e. the next request will force a fresh
+  Celestrak fetch. /debris/{norad_id}, /plan, and /replan untouched —
+  all three call _get_scored_field() directly, which still returns a
+  bare list internally.
+- Frontend — App.jsx unpacks the new response shape and passes
+  cacheMetadata down to DebrisGlobe.jsx, which displays a live-updating
+  "Debris data: N min old" label (recalculated client-side every 30s
+  from data_fetched_at, not a static string baked in at fetch time) plus
+  an amber "refreshing soon" badge when data_stale is true.
+
+Verified: confirmed via grep that App.jsx is the sole frontend consumer
+of /debris-field (api.js's getDebrisField() is just the request
+wrapper) — no other component was silently left expecting the old
+bare-array shape.
+
+Bugs found & fixed: 0 (clean addition).
+
+## Phasing/timing — RAAN drift (bounded scope)
+
+Modules touched: 2 (B) + main.py (no changes required)
+
+Addresses one half of the "no phasing/timing" limitation flagged in
+prior checkpoints: predicting where a target's orbital plane will
+actually be by the time the spacecraft arrives, using elapsed mission
+time. Does NOT address the other half — reordering the route to
+minimize wait time — which stays explicitly out of scope (see docstring
+note below).
+
+- delta_v.py — added raan_drift_deg(altitude_km, inclination_deg,
+  elapsed_days), a closed-form J2 secular RAAN drift approximation
+  (dΩ/dt ≈ -1.5 * n * J2 * (Re/p)^2 * cos(i)), not live skyfield
+  propagation (kept formula-based for per-request speed). Module
+  docstring's "STILL NOT MODELED: phasing/timing" note split in two:
+  RAAN drift is now modeled; true-anomaly phasing (in-plane timing,
+  i.e. wait-time route optimization) is still not modeled.
+- optimizer.py — the route-walking step now projects each candidate's
+  RAAN forward by estimated cumulative elapsed time (heuristic:
+  TRANSFER_TIME_DAYS_PER_KM_S = 10.0 mission days per km/s delta-v,
+  untuned placeholder) before recomputing transfer cost with
+  transfer_delta_v(), instead of using the target's static fetch-time
+  RAAN for the whole route. Legs that become unreachable once drift is
+  priced in are dropped (same treatment as fuel-budget exhaustion)
+  rather than silently costed against stale data. New fields:
+  arrival_time_days (route_details, step_breakdown), raan_drift_deg
+  (step_breakdown).
+- main.py — no changes needed; route_details/step_breakdown flow
+  through _run_plan() to the response unfiltered, confirmed by reading
+  the code directly rather than assuming.
+
+Verified:
+- Formula check: raan_drift_deg(800, 98, 1) = 0.917019 deg/day vs the
+  known sun-synchronous rate of 0.9856 deg/day — correct sign
+  (retrograde-orbit positive) and right order of magnitude; the ~0.07
+  deg/day gap is expected since 800km/98.0deg is a rounded
+  approximation of an exact SSO pair, not itself SSO-tuned.
+- Live A/B at start_altitude_km=800, start_inclination_deg=98,
+  start_raan_deg=222, fuel_budget_km_s=8.0: static-RAAN run visited 2
+  objects (5.6526 km/s, risk 1.9848); drift-aware run visited 1
+  (5.4921 km/s, risk 0.9882) — hop 2 correctly dropped once ~54.9
+  elapsed days of drift (+50.4deg RAAN) pushed its true cost to ~6.7
+  km/s, over the ~2.51 km/s remaining. Confirms the drift calculation
+  is live and changes route selection, not just present in code unused.
+- fuel_budget_km_s=2.0 (the original test value) returns 0 visits on
+  both static and drift-aware runs — correct, not a bug: even the
+  cheapest reachable hop from this cross-inclination start (3.099 km/s)
+  exceeds the budget before drift is even a factor.
+
+Not yet done: TRANSFER_TIME_DAYS_PER_KM_S is an untuned heuristic
+constant, not derived from real mission pacing data — worth a one-line
+README disclosure. Wait-time route reordering (resequencing stops to
+minimize idle time, not just checking reachability) remains unbuilt and
+out of scope for this pass.
+
+Bugs found & fixed: 0 (clean addition).

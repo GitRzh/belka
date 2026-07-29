@@ -1,116 +1,121 @@
-import { useEffect, useState } from 'react';
-import LandingPage from './components/LandingPage.jsx';
-import GlobeView from './components/GlobeView.jsx';
-import ManifestPanel from './components/ManifestPanel.jsx';
-import ReasoningPanel from './components/ReasoningPanel.jsx';
-import ReplanBar from './components/ReplanBar.jsx';
-import { fetchDebrisField, fetchPlan, fetchNaiveRoute, fetchReplan } from './api.js';
-
-const LAUNCH_SITES = {
-  kourou: { label: 'Kourou (5.2°N)', lat: 5.2, lon: -52.8, altitude_km: 400, inclination_deg: 5.2 },
-  cape_canaveral: { label: 'Cape Canaveral', lat: 28.4, lon: -80.6, altitude_km: 400, inclination_deg: 28.4 },
-  vandenberg: { label: 'Vandenberg', lat: 34.7, lon: -120.6, altitude_km: 400, inclination_deg: 97.5 },
-};
+import { useEffect, useState } from 'react'
+import DebrisGlobe from './components/DebrisGlobe.jsx'
+import PlanForm from './components/PlanForm.jsx'
+import ReasoningPanel from './components/ReasoningPanel.jsx'
+import ReplanInput from './components/ReplanInput.jsx'
+import { api } from './api.js'
 
 export default function App() {
-  const [view, setView] = useState('landing'); // 'landing' | 'console'
-  const [debrisField, setDebrisField] = useState([]);
-  const [siteKey, setSiteKey] = useState('kourou');
-  const [plan, setPlan] = useState(null);
-  const [naiveRoute, setNaiveRoute] = useState(null);
-  const [showNaive, setShowNaive] = useState(false);
-  const [selectedNoradId, setSelectedNoradId] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [usingMock, setUsingMock] = useState(false);
+  const [debrisField, setDebrisField] = useState([])
+  const [debrisFieldError, setDebrisFieldError] = useState(null)
+  const [cacheMetadata, setCacheMetadata] = useState(null) // { data_fetched_at, data_stale }
+
+  const [lastPlanRequest, setLastPlanRequest] = useState(null) // needed for /replan body
+  const [plan, setPlan] = useState(null) // current active plan shown on the globe
+  const [naivePlan, setNaivePlan] = useState(null)
+  const [routeMode, setRouteMode] = useState('ai') // 'ai' | 'naive'
+  const [replanResult, setReplanResult] = useState(null) // diff + overrides from last /replan
+
+  const [planning, setPlanning] = useState(false)
+  const [replanning, setReplanning] = useState(false)
+  const [formError, setFormError] = useState(null)
 
   useEffect(() => {
-    fetchDebrisField().then((field) => {
-      setDebrisField(field);
-      generatePlan(field);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    api
+      .getDebrisField()
+      .then((res) => {
+        setDebrisField(res.debris_field)
+        setCacheMetadata({ data_fetched_at: res.data_fetched_at, data_stale: res.data_stale })
+      })
+      .catch((err) => setDebrisFieldError(err.message))
+  }, [])
 
-  function planParams(field = debrisField) {
-    const site = LAUNCH_SITES[siteKey];
-    return {
-      start_altitude_km: site.altitude_km,
-      start_inclination_deg: site.inclination_deg,
-      fuel_budget_km_s: 3.0,
-    };
+  async function handleGeneratePlan(payload) {
+    setPlanning(true)
+    setFormError(null)
+    setReplanResult(null)
+    setNaivePlan(null) // invalidate cached naive route when plan inputs change
+    try {
+      const result = await api.plan(payload)
+      setPlan(result)
+      setLastPlanRequest(payload)
+      setRouteMode('ai')
+    } catch (err) {
+      // 404 (bad target_norad_id, or excluded-by-filter hint) and
+      // 422 (bad removal_method_filter / monitor_only target) both land here —
+      // err.body holds the detail message from the backend.
+      setFormError(err.body?.detail || err.message)
+    } finally {
+      setPlanning(false)
+    }
   }
 
-  async function generatePlan(field = debrisField) {
-    setBusy(true);
-    const [p, n] = await Promise.all([fetchPlan(planParams(field)), fetchNaiveRoute()]);
-    setPlan(p);
-    setNaiveRoute(n);
-    setBusy(false);
+  async function handleReplan(userRequestText) {
+    if (!lastPlanRequest) return
+    setReplanning(true)
+    setFormError(null)
+    try {
+      const result = await api.replan({ ...lastPlanRequest, user_request_text: userRequestText })
+      setPlan(result.new_plan)
+      setRouteMode('ai')
+      setReplanResult({ diff: result.diff, overrides_applied: result.overrides_applied, explanation: result.explanation })
+    } catch (err) {
+      setFormError(err.body?.detail || err.message)
+    } finally {
+      setReplanning(false)
+    }
   }
 
-  async function handleReplan(text) {
-    if (!plan) return;
-    setBusy(true);
-    const result = await fetchReplan(plan, text, planParams());
-    setPlan(result.new_plan);
-    setBusy(false);
+  async function handleToggleNaive() {
+    if (routeMode === 'ai') {
+      if (!naivePlan) {
+        try {
+          const result = await api.getNaiveRoute(lastPlanRequest)
+          setNaivePlan(result)
+        } catch (err) {
+          setFormError(err.message)
+          return
+        }
+      }
+      setRouteMode('naive')
+    } else {
+      setRouteMode('ai')
+    }
   }
 
-  const site = LAUNCH_SITES[siteKey];
+  const activePlan = routeMode === 'ai' ? plan : naivePlan
 
-  if (view === 'landing') {
-    return <LandingPage onEnter={() => setView('console')} debrisField={debrisField} />;
+  if (debrisFieldError) {
+    return <p>Failed to load debris field: {debrisFieldError}</p>
   }
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div className="app-title">
-          <span className="app-title-mark">◈</span>
-          <span>orbital-clean / mission console</span>
-        </div>
-        <select value={siteKey} onChange={(e) => { setSiteKey(e.target.value); }}>
-          {Object.entries(LAUNCH_SITES).map(([key, s]) => (
-            <option key={key} value={key}>launch site: {s.label}</option>
-          ))}
-        </select>
-      </header>
-
-      <div className="app-grid">
-        <ManifestPanel
+    <div style={{ display: 'flex', height: '100%' }}>
+      <div style={{ flex: 1 }}>
+        <DebrisGlobe
           debrisField={debrisField}
-          plan={showNaive ? naiveRoute : plan}
-          selectedNoradId={selectedNoradId}
-          onSelectDebris={setSelectedNoradId}
+          route={activePlan?.route}
+          depot={activePlan?.depot}
+          routeStyle={routeMode === 'ai' ? 'solid' : 'dashed'}
+          cacheMetadata={cacheMetadata}
         />
-
-        <div className="globe-panel">
-          <GlobeView
-            debrisField={debrisField}
-            plan={plan}
-            naiveRoute={naiveRoute}
-            showNaive={showNaive}
-            selectedNoradId={selectedNoradId}
-            onSelectDebris={setSelectedNoradId}
-            launchSite={{ lat: site.lat, lon: site.lon }}
-          />
-          <div className="globe-legend">
-            <span><i className="dot" style={{ background: '#4dd8e6' }} /> launch site</span>
-            <span><i className="dot" style={{ background: showNaive ? '#8a94a6' : '#1D9E75' }} /> route ({showNaive ? 'naive' : 'optimized'})</span>
-            <span><i className="dot" style={{ background: '#BA7517' }} /> high risk</span>
-          </div>
-        </div>
-
-        <ReasoningPanel plan={showNaive ? naiveRoute : plan} loading={busy} showNaive={showNaive} />
       </div>
 
-      <ReplanBar
-        onReplan={handleReplan}
-        onGeneratePlan={() => generatePlan()}
-        onToggleNaive={() => setShowNaive((v) => !v)}
-        showNaive={showNaive}
-        busy={busy}
-      />
+      <div style={{ width: 380, overflowY: 'auto', padding: 16 }}>
+        <PlanForm onSubmit={handleGeneratePlan} submitting={planning} />
+
+        {formError && <p role="alert">{formError}</p>}
+
+        {plan && (
+          <button onClick={handleToggleNaive}>
+            {routeMode === 'ai' ? 'Show naive route' : 'Show AI route'}
+          </button>
+        )}
+
+        <ReasoningPanel plan={activePlan} />
+
+        <ReplanInput onReplan={handleReplan} submitting={replanning} disabled={!plan} replanResult={replanResult} />
+      </div>
     </div>
-  );
+  )
 }

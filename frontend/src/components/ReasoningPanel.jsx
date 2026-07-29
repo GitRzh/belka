@@ -1,40 +1,69 @@
-export default function ReasoningPanel({ plan, loading, showNaive }) {
-  if (loading) {
-    return (
-      <div className="panel">
-        <p className="panel-label">reasoning trace</p>
-        <p className="console-line">computing route…</p>
-      </div>
-    );
-  }
+// Handles the edge states called out in CHECKPOINT.txt:
+// - explanation_error -> plan still valid, show "explanation unavailable" inline
+// - warning -> surface it, don't drop it
 
-  if (!plan) {
-    return (
-      <div className="panel">
-        <p className="panel-label">reasoning trace</p>
-        <p className="console-line panel-footnote">generate a plan to see reasoning here.</p>
-      </div>
-    );
-  }
+export default function ReasoningPanel({ plan }) {
+  if (!plan) return null
 
   return (
-    <div className="panel">
-      <p className="panel-label">reasoning trace {showNaive ? '· naive baseline' : '· optimized'}</p>
-      <div className="console">
-        <p className="console-line">pool: {plan.pool_size_used} candidates</p>
-        <p className="console-line">route: {plan.visited_count} targets</p>
-        <p className="console-line">
-          fuel: {plan.total_fuel_cost_km_s.toFixed(1)} / {plan.fuel_budget_km_s.toFixed(1)} km/s
-          {' '}({Math.round(plan.fuel_used_fraction * 100)}%)
-        </p>
-        <p className="console-line">risk collected: {plan.total_risk_collected.toFixed(2)}</p>
+    <div>
+      <h3>Reasoning</h3>
+
+      {plan.warning && <p role="alert">Warning: {plan.warning}</p>}
+
+      {plan.explanation ? (
+        <p>{plan.explanation}</p>
+      ) : (
+        <p>Explanation unavailable{plan.explanation_error ? ` (${plan.explanation_error})` : ''}.</p>
+      )}
+
+      <dl>
+        <dt>Visited</dt>
+        <dd>{plan.visited_count}</dd>
+        <dt>Pool size used</dt>
+        <dd>{plan.pool_size_used}</dd>
+        <dt>Fuel used</dt>
+        <dd>
+          {plan.total_fuel_cost_km_s} / {plan.fuel_budget_km_s} km/s (
+          {Math.round((plan.fuel_used_fraction ?? 0) * 100)}%)
+        </dd>
+        <dt>Total risk collected</dt>
+        <dd>{plan.total_risk_collected}</dd>
         {plan.skipped_count > 0 && (
-          <p className="console-line panel-footnote">skipped: {plan.skipped_count} objects</p>
+          <>
+            <dt>Skipped</dt>
+            <dd>
+              {plan.skipped_count} ({plan.skipped_names?.join(', ')})
+            </dd>
+          </>
         )}
-        <p className="console-line console-explanation">
-          {plan.explanation_error ? 'explanation unavailable this run.' : plan.explanation}
-        </p>
-      </div>
+      </dl>
+
+      {plan.step_breakdown?.length > 0 && (
+        <details>
+          <summary>Step-by-step breakdown</summary>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginTop: 6 }}>
+            <thead>
+              <tr>
+                {['From', 'To', 'Δv (km/s)', 'Arrival (days)', 'RAAN drift (°)'].map((h) => (
+                  <th key={h} style={{ textAlign: 'left', borderBottom: '1px solid #555', padding: '2px 4px' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {plan.step_breakdown.map((step, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid #333' }}>
+                  <td style={{ padding: '2px 4px' }}>{step.from}</td>
+                  <td style={{ padding: '2px 4px' }}>{step.to}</td>
+                  <td style={{ padding: '2px 4px' }}>{step.delta_v_km_s}</td>
+                  <td style={{ padding: '2px 4px' }}>{step.arrival_time_days ?? '—'}</td>
+                  <td style={{ padding: '2px 4px' }}>{step.raan_drift_deg ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
     </div>
-  );
+  )
 }

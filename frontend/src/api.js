@@ -1,46 +1,58 @@
-import { MOCK_DEBRIS_FIELD, MOCK_PLAN, MOCK_NAIVE_ROUTE, mockReplan } from './mockData.js';
+// Thin wrapper around the backend documented in CHECKPOINT.txt's
+// "API SURFACE FOR FRONTEND" section. Keep response shapes untouched here —
+// let the components decide what to do with explanation_error / warning / etc.
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
-const TIMEOUT_MS = 2500;
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
-async function tryFetch(path, options) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), TIMEOUT_MS);
+async function request(path, options = {}) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  })
+
+  // Don't throw on 404/422 — callers need the body (hint messages, field
+  // errors) per the "Error/edge states" notes in CHECKPOINT.txt.
+  let body = null
   try {
-    const res = await fetch(`${API_BASE}${path}`, { ...options, signal: controller.signal });
-    clearTimeout(t);
-    if (!res.ok) throw new Error(`${res.status}`);
-    return await res.json();
-  } catch (err) {
-    clearTimeout(t);
-    return null; // signals "use mock" to callers below
+    body = await res.json()
+  } catch {
+    // no body / not JSON
   }
+
+  if (!res.ok) {
+    const err = new Error(body?.detail || `Request failed: ${res.status}`)
+    err.status = res.status
+    err.body = body
+    throw err
+  }
+
+  return body
 }
 
-export async function fetchDebrisField() {
-  const live = await tryFetch('/debris-field');
-  return live ?? MOCK_DEBRIS_FIELD;
-}
+export const api = {
+  getDebrisField: () => request('/debris-field'),
 
-export async function fetchPlan(body) {
-  const live = await tryFetch('/plan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return live ?? MOCK_PLAN;
-}
+  getDebrisById: (noradId) => request(`/debris/${noradId}`),
 
-export async function fetchNaiveRoute() {
-  const live = await tryFetch('/naive-route');
-  return live ?? MOCK_NAIVE_ROUTE;
-}
+  getNaiveRoute: (params) => {
+    const qs = new URLSearchParams({
+      start_altitude_km: params.start_altitude_km,
+      start_inclination_deg: params.start_inclination_deg,
+      fuel_budget_km_s: params.fuel_budget_km_s,
+      ...(params.pool_size != null ? { pool_size: params.pool_size } : {}),
+    }).toString()
+    return request(`/naive-route?${qs}`)
+  },
 
-export async function fetchReplan(currentPlan, userRequestText, planParams) {
-  const live = await tryFetch('/replan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...planParams, user_request_text: userRequestText }),
-  });
-  return live ?? mockReplan(currentPlan, userRequestText);
+  plan: (payload) =>
+    request('/plan', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  replan: (payload) =>
+    request('/replan', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 }

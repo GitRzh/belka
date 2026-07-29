@@ -28,9 +28,11 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 try:
     from .cost_matrix import build_cost_matrix, scale_matrix_for_ortools
     from .removal_method import METHOD_NET_CAPTURE
+    from .delta_v import raan_drift_deg, transfer_delta_v
 except ImportError:
     from cost_matrix import build_cost_matrix, scale_matrix_for_ortools  # pyright: ignore[reportImplicitRelativeImport]
     from removal_method import METHOD_NET_CAPTURE  # pyright: ignore[reportImplicitRelativeImport]
+    from delta_v import raan_drift_deg, transfer_delta_v  # pyright: ignore[reportImplicitRelativeImport]
 
 DEFAULT_NETS_CARRIED = 1  # RemoveDEBRIS's actual flight history: exactly one net carried.
 
@@ -38,18 +40,33 @@ RISK_PENALTY_SCALE = 3000.0  # risk_score in [0,1] -> penalty in scaled cost uni
                               # (units match cost_matrix.DELTA_V_SCALE: 1 unit = 1 m/s)
 SOLVER_TIME_LIMIT_SECONDS = 5
 
+# Heuristic: days of elapsed mission time per km/s of delta-v spent.
+# Based on a rough LEO transfer time estimate (~1 day per 0.1 km/s of dv
+# for typical Hohmann + phasing at 800km). Tunable; used only for RAAN
+# drift projection, not for the optimizer's cost matrix itself.
+TRANSFER_TIME_DAYS_PER_KM_S = 10.0
 
-def _build_depot_node(altitude_km: float, inclination_deg: float) -> dict[str, Any]:
+
+def _build_depot_node(altitude_km: float, inclination_deg: float, raan_deg: float = 0.0) -> dict[str, Any]:
     """Wraps the spacecraft's current orbit in the same dict shape as a
     debris object, so it can go through build_cost_matrix() unmodified.
     risk_score=0.0 since the depot isn't a target -- it's never offered to
     AddDisjunction, so this value is never actually used, just present for
-    shape consistency."""
+    shape consistency.
+
+    raan_deg defaults to 0.0: real debris objects carry a real raan_deg
+    from tle_fetch.py, but the spacecraft's own current RAAN isn't known
+    unless the caller supplies it (main.py's start_raan_deg). 0.0 is a
+    silent-but-safe fallback -- it reproduces the pre-RAAN |incl1-incl2|
+    approximation for depot hops specifically, not a crash, but it's the
+    one remaining place the old blind spot can still show up until every
+    caller passes a real value."""
     return {
         "norad_id": -1,
         "name": "DEPOT (spacecraft start)",
         "altitude_km": altitude_km,
         "inclination_deg": inclination_deg,
+        "raan_deg": raan_deg,
         "risk_score": 0.0,
     }
 
@@ -59,6 +76,7 @@ def optimize_route(
     fuel_budget_km_s: float,
     start_altitude_km: float,
     start_inclination_deg: float,
+    start_raan_deg: float = 0.0,
     risk_penalty_scale: float = RISK_PENALTY_SCALE,
     nets_carried: int = DEFAULT_NETS_CARRIED,
 ) -> dict[str, Any]:
@@ -66,6 +84,12 @@ def optimize_route(
     Solve the orienteering problem over `pool` (the ~30-50 candidate objects
     from cost_matrix.select_candidate_pool()), starting from the spacecraft's
     current orbit, subject to a total delta-v budget.
+
+    start_raan_deg: the spacecraft's current RAAN. Defaults to 0.0 if the
+    caller doesn't know it, which falls back to the pre-RAAN
+    |incl1-incl2| approximation for depot->first-hop legs only -- every
+    other leg (debris-to-debris) already uses real RAAN values from
+    tle_fetch.py regardless of this default.
 
     nets_carried caps how many net_capture stops the route may include --
     a real hardware constraint, not a tunable knob: RemoveDEBRIS (the only
@@ -75,7 +99,7 @@ def optimize_route(
     Returns route order, visited vs skipped candidates, total fuel cost,
     per-step cost breakdown, and how much of the budget got used.
     """
-    depot = _build_depot_node(start_altitude_km, start_inclination_deg)
+    depot = _build_depot_node(start_altitude_km, start_inclination_deg, start_raan_deg)
 
     # Node layout: [0] depot (start) | [1..n] pool | [n+1] virtual end
     nodes = [depot] + pool
@@ -170,24 +194,76 @@ def optimize_route(
             return obj["name"]
         return f"{obj['name']} ({obj['norad_id']})"
 
-    # Per-step breakdown, walking depot -> visited nodes in solved order.
+    # Per-step breakdown, walking depot -> visited nodes in solved order,
+    # applying J2 RAAN drift to each target's RAAN at the predicted arrival time.
+    #
+    # Design: OR-Tools solved using the static (fetch-time) cost matrix -- we
+    # can't rebuild the matrix per-leg during solving. The drift correction
+    # happens here in post-solve: for each leg we (a) estimate arrival time from
+    # cumulative delta-v so far, (b) project the target's RAAN forward by that
+    # elapsed time, (c) recompute the actual arc cost with the drifted RAAN. If
+    # the drifted cost pushes the leg over the remaining fuel budget, it's marked
+    # unreachable and the walk stops -- same semantics as a hard budget overrun.
+    #
     # Uses node indices directly (already known from visited_pool_indices)
     # rather than nodes.index(obj) -- list.index() on dicts does a value
     # equality scan, which isn't a safe identity check if two objects ever
     # have identical field values.
     step_breakdown: list[dict[str, Any]] = []
+    arrival_time_per_pool_i: dict[int, float] = {}  # pool_i -> cumulative days at arrival
     total_fuel = 0.0
+    elapsed_days = 0.0
+    fuel_remaining = fuel_budget_km_s
     prev_node_index = 0  # depot is always node 0
-    for pool_i in visited_pool_indices:
+    drift_truncated_at: int | None = None  # pool index where drift made leg unaffordable
+
+    for step_i, pool_i in enumerate(visited_pool_indices):
         node_index = pool_i + 1
-        result_matrix_lookup = matrix[prev_node_index][node_index]
+        from_node = nodes[prev_node_index]
+        to_node   = nodes[node_index]
+
+        # Project the target's RAAN forward to predicted arrival time.
+        fetch_time_raan = to_node.get("raan_deg", 0.0)
+        drift = raan_drift_deg(to_node["altitude_km"], to_node.get("inclination_deg", 0.0), elapsed_days)
+        projected_raan = fetch_time_raan + drift
+
+        # Recompute arc cost with drifted RAAN.
+        drifted_cost = transfer_delta_v(
+            alt1_km=from_node["altitude_km"],
+            incl1_deg=from_node.get("inclination_deg", 0.0),
+            alt2_km=to_node["altitude_km"],
+            incl2_deg=to_node.get("inclination_deg", 0.0),
+            raan1_deg=from_node.get("raan_deg", 0.0),
+            raan2_deg=projected_raan,
+        )["delta_v_total_km_s"]
+
+        if drifted_cost > fuel_remaining:
+            # Drift-adjusted cost exceeds remaining budget -- stop the walk here.
+            # visited_objects/route_details will be truncated to only the steps
+            # that actually completed.
+            drift_truncated_at = step_i
+            break
+
         step_breakdown.append({
-            "from": _label(nodes[prev_node_index]),
-            "to": _label(nodes[node_index]),
-            "delta_v_km_s": round(result_matrix_lookup, 4),
+            "from": _label(from_node),
+            "to": _label(to_node),
+            "delta_v_km_s": round(drifted_cost, 4),
+            "arrival_time_days": round(elapsed_days, 4),
+            "raan_drift_deg": round(drift, 4),
         })
-        total_fuel += result_matrix_lookup
+        total_fuel += drifted_cost
+        fuel_remaining -= drifted_cost
+        # Advance elapsed time by estimated transfer duration for this leg.
+        elapsed_days += drifted_cost * TRANSFER_TIME_DAYS_PER_KM_S
+        arrival_time_per_pool_i[pool_i] = elapsed_days
         prev_node_index = node_index
+
+    # If drift truncated the walk, trim visited_objects to match completed steps.
+    if drift_truncated_at is not None:
+        visited_pool_indices = visited_pool_indices[:drift_truncated_at]
+        visited_objects      = [pool[i] for i in visited_pool_indices]
+        visited_index_set    = set(visited_pool_indices)
+        skipped_objects      = [obj for i, obj in enumerate(pool) if i not in visited_index_set]
 
     # route_details: full per-object detail in solved visit order.
     # object_type/removal_method are additive fields from
@@ -204,8 +280,9 @@ def optimize_route(
             "possible_methods": o.get("possible_methods", []),
             "method_maturity": o.get("method_maturity", {}),
             "risk_score": round(o.get("risk_score", 0.0), 4),
+            "arrival_time_days": round(arrival_time_per_pool_i.get(pool_i, 0.0), 4),
         }
-        for o in visited_objects
+        for pool_i, o in zip(visited_pool_indices, visited_objects)
     ]
 
     return {

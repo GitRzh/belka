@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import groq as groq_module
@@ -29,11 +30,12 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
-from app.tle_fetch import get_debris_field
+from app.tle_fetch import get_debris_field, get_cache_timestamp, CACHE_MAX_AGE_SECONDS
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE
 from app.optimizer import optimize_route, RISK_PENALTY_SCALE
 from app.removal_method import add_removal_methods, METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE, METHOD_MONITOR_ONLY
+from fastapi.middleware.cors import CORSMiddleware
 
 # monitor_only excluded: it's never a real route target (see cost_matrix.
 # select_candidate_pool), so it's not a legal removal_method_filter value.
@@ -43,6 +45,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Orbital-Clean API")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, float]] = None) -> list[dict[str, Any]]:
     """Shared by /debris-field, /debris/{norad_id}, and /plan/replan so
@@ -62,6 +70,7 @@ def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, f
 class PlanRequest(BaseModel):
     start_altitude_km: float = Field(..., description="Spacecraft's current orbit altitude, km")
     start_inclination_deg: float = Field(..., description="Spacecraft's current orbit inclination, deg")
+    start_raan_deg: float = Field(0.0, description="Spacecraft's current orbit RAAN, deg. Defaults to 0.0 if the caller doesn't know their spacecraft's current RAAN, which re-enables the pre-RAAN |incl1-incl2| approximation for depot hops only -- every debris-to-debris leg already uses real RAAN values from tle_fetch.py regardless.")
     fuel_budget_km_s: float = Field(..., gt=0, description="Total delta-v budget for the mission, km/s")
     pool_size: int = Field(DEFAULT_POOL_SIZE, gt=0, description="How many top-risk candidates the optimizer considers")
     risk_penalty_scale: float = Field(RISK_PENALTY_SCALE, description="Tuning knob: higher = solver skips fewer risky nodes even if fuel-expensive")
@@ -77,8 +86,15 @@ class ReplanRequest(PlanRequest):
 
 @app.get("/debris-field")
 def debris_field(force_refresh: bool = False):
-    """Full scored, risk-ranked debris list (riskiest first)."""
-    return _get_scored_field(force_refresh=force_refresh)
+    """Full scored, risk-ranked debris list (riskiest first), with cache metadata."""
+    field = _get_scored_field(force_refresh=force_refresh)
+    fetched_at = get_cache_timestamp()
+    age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(fetched_at)).total_seconds()
+    return {
+        "debris_field": field,
+        "data_fetched_at": fetched_at,
+        "data_stale": age_seconds >= (CACHE_MAX_AGE_SECONDS - 600),  # within 10 min of refresh
+    }
 
 
 @app.get("/debris/{norad_id}")
@@ -139,6 +155,7 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
         fuel_budget_km_s=req.fuel_budget_km_s,
         start_altitude_km=req.start_altitude_km,
         start_inclination_deg=req.start_inclination_deg,
+        start_raan_deg=req.start_raan_deg,
         risk_penalty_scale=req.risk_penalty_scale,
         nets_carried=req.nets_carried,
     )
@@ -164,6 +181,19 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
         )
 
     result["pool_size_used"] = len(pool)
+
+    # Echo the depot position back so the frontend can draw the depot->first-debris
+    # leg.  latitude/longitude default to 0.0 (equatorial crossing) -- the
+    # spacecraft's real ground-track position isn't known from a PlanRequest alone
+    # (we only have orbital elements), so 0/0 is the honest "unlocated" convention
+    # used throughout the codebase rather than inventing a fake position.
+    result["depot"] = {
+        "altitude_km": req.start_altitude_km,
+        "inclination_deg": req.start_inclination_deg,
+        "raan_deg": req.start_raan_deg,
+        "latitude": 0.0,
+        "longitude": 0.0,
+    }
     return result
 
 

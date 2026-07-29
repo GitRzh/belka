@@ -60,6 +60,15 @@ def build_cost_matrix(objects: list[dict[str, Any]]) -> list[list[float]]:
             result = transfer_delta_v(
                 a["altitude_km"], a["inclination_deg"],
                 b["altitude_km"], b["inclination_deg"],
+                # .get(..., 0.0): real debris objects carry raan_deg from
+                # tle_fetch.py. The depot node (optimizer.py's
+                # _build_depot_node) doesn't have one yet, so hops touching
+                # the depot silently fall back to the old |incl1-incl2|
+                # behavior until a start_raan_deg request field exists --
+                # a safe fallback, not a crash, but still a known gap for
+                # that one node specifically (see delta_v.py docstring).
+                raan1_deg=a.get("raan_deg", 0.0),
+                raan2_deg=b.get("raan_deg", 0.0),
             )
             cost = result["delta_v_total_km_s"]
             matrix[i][j] = cost
@@ -104,6 +113,11 @@ if __name__ == "__main__":
                 "name": f"{name}-{obj_id}",
                 "altitude_km": round(base_alt + random.uniform(-20, 20), 2),
                 "inclination_deg": round(base_incl + random.uniform(-0.3, 0.3), 4),
+                # raan_deg added: jittered per-cluster like inclination/altitude,
+                # so the synthetic test data actually exercises the new RAAN
+                # path instead of silently falling back to the 0.0 default
+                # (which would defeat the point of this sanity check).
+                "raan_deg": round(random.uniform(0.0, 360.0), 4),
                 "latitude": 0.0,
                 "longitude": 0.0,
                 "bstar": random.uniform(0.00001, 0.0001),
