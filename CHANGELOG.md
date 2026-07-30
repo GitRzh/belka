@@ -372,3 +372,166 @@ minimize idle time, not just checking reachability) remains unbuilt and
 out of scope for this pass.
 
 Bugs found & fixed: 0 (clean addition).
+## Straight-line route polyline fix (frontend)
+
+Modules touched: 1 (frontend, `DebrisGlobe.jsx`)
+
+Route legs were previously drawn as a straight chord between two stop
+positions. Replaced with a new `slerpArc()` helper: spherical (slerp)
+interpolation for direction, radius linearly interpolated between the
+true start/end altitudes (not the mean of the two).
+
+Two real bugs caught and fixed in the same pass, not shipped separately:
+- Antipodal guard gap — the degenerate case at `omega ≈ 0` was already
+  guarded (falls back to a straight lerp), but `omega ≈ π` (diametrically
+  opposite stops) was not: `sin(omega) → 0` at both ends of the angular
+  range, which would have produced garbage direction vectors for that
+  case. Both ends now fall back correctly.
+- Junction-altitude bug — every arc point, including the two endpoints,
+  was being scaled to the *mean* altitude of the two stops rather than
+  each stop's true altitude, so junctions visually floated up to ~22 km
+  off the actual debris marker at realistic altitude spreads (verified
+  against 3 live legs from real Celestrak data, 700-1000km band). Fixed
+  by interpolating radius linearly from `rA` to `rB`, so `t=0` lands
+  exactly on `a` and `t=1` exactly on `b`.
+
+Also confirmed (no fix needed): the depot leg (route's first leg)
+already gets identical arc treatment — depot is prepended into the
+position array before arc expansion, so there's no special-casing gap.
+
+Verified: diffed directly against the single commit that introduced
+this (there was no prior shipped arc implementation to regress from —
+this was a from-scratch build, not a fix to previously-committed code).
+`vite build` clean.
+
+Bugs found & fixed: 2 (antipodal guard, junction altitude).
+
+Note: this is a smooth spherical interpolation with correct endpoint
+altitudes, not a physically simulated transfer trajectory — disclosed
+in README.
+
+## SATCAT radar-cross-section join → risk_score size factor
+
+Modules touched: 2 (A: `tle_fetch.py`, `risk_score.py`)
+
+- `tle_fetch.py` — new `fetch_group_satcat()` queries CelesTrak's SATCAT
+  `records.php` by the same `GROUP=` parameter and `DEBRIS_GROUPS` list
+  already used for TLE fetches (3 requests total, not per-object).
+  Returns a `norad_id -> rcs_m2` dict. `RCS` values that are null,
+  missing, empty, or `<= 0.0` (physically meaningless) are treated as
+  `None`, not zero. `get_debris_field()` joins `rcs_m2` onto every object
+  before writing the cache, so cache hits carry it without a second
+  SATCAT round-trip; per-group SATCAT failures are caught individually
+  and logged, don't abort the TLE fetch.
+- `risk_score.py` — `DEFAULT_WEIGHTS` changed from
+  `{proximity: 0.6, lifetime: 0.4}` to
+  `{proximity: 0.45, lifetime: 0.30, size: 0.25}`. New `_size_scores()`
+  min-max normalizes `rcs_m2` only over the subset of objects that have
+  a value; objects with `rcs_m2 is None` get `size_score: None` — never
+  defaulted to 0 or the mean, which would have silently suppressed risk
+  for exactly the untracked/small fragments this project cares about
+  most. `score_debris_field()` blends all three terms when available;
+  when `size_score` is `None`, blends proximity+lifetime only,
+  renormalized by `(w_prox + w_life)` so output stays in `[0,1]`
+  regardless of coverage. Backward-compatible: a caller-supplied
+  `weights` override missing the `"size"` key still falls back to
+  `DEFAULT_WEIGHTS["size"]`, same `.get()` pattern already used for
+  proximity/lifetime. Every object now also carries `rcs_m2` and
+  `size_score_available` (bool).
+
+Verified: live run showed 270/274 objects with a non-null `rcs_m2` (the
+4 without one were all Iridium-33 fragments). Independently re-verified
+offline with synthetic data: `risk_score` stayed in `[0,1]` across
+mixed-coverage batches, renormalization math correct, partial-weights
+override doesn't crash, an all-null-RCS batch degrades gracefully.
+
+Bugs found & fixed: 0 (clean addition).
+
+## removal_method_explanation — LLM justification per technique
+
+Modules touched: 2 (C: `main.py`, B: `optimizer.py`)
+
+- `main.py` — new `_explain_removal_method()`, cached by `removal_method`
+  alone (bounded at 3 entries — only 3 distinct values exist). Calls
+  Groq `openai/gpt-oss-120b` (same model as `_explain_plan`) for a 1-2
+  sentence justification grounded in real flight-heritage facts
+  (`net_capture` = flight-demonstrated, RemoveDEBRIS 2018-2019;
+  `robotic_arm` = conceptual, no flown precedent on uncooperative
+  debris; `monitor_only` = tracking, not a capture technique). The
+  explanation is generic to the technique, never references a specific
+  object/norad_id, since the same cached text is reused across every
+  object sharing that method — an intentional choice to avoid inviting
+  the LLM to hallucinate object-specific claims for no real benefit. A
+  deterministic fallback template is built *before* the LLM call fires,
+  so it's always ready; on any Groq error or empty/malformed response,
+  the fallback is used and cached (a dead API isn't re-hit per object).
+  `removal_method_explanation_source` (`"llm"` / `"fallback"`) exposes
+  which happened. `_get_scored_field()` attaches both fields to every
+  object.
+- `optimizer.py` — `route_details` is a fixed-field dict, not a
+  passthrough of the full object, so a one-line addition was required
+  there too — without it, the explanation would only ever have appeared
+  in `/debris-field`/`/debris/{norad_id}`, never in `/plan`/`/replan`,
+  which is where "recommended method per target" (PLAN.txt) actually
+  matters.
+
+Verified: 3 new tests confirm (a) the LLM is called at most once per
+distinct `removal_method` across a full live-sized batch, not once per
+object, (b) `route_details` entries carry the field (proves the
+`optimizer.py` wiring specifically, not just the `main.py` enrichment),
+(c) a simulated Groq `APIConnectionError` produces a non-empty fallback
+with `source: "fallback"`. 32/33 suite passing at the time; the 1
+failure was pre-existing and unrelated (see next entry).
+
+Bugs found & fixed: 0 (clean addition).
+
+## TLE data-quality labeling + max_tle_age_days
+
+Modules touched: 1 (C: `main.py`)
+
+- New `_data_quality(epoch_age_days)` → `"fresh"` (< 7 days), `"aging"`
+  (7-14), `"stale"` (> 14). Thresholds grounded in published
+  TLE-accuracy research (position error grows roughly 1-3 km/day from
+  epoch; ~2 weeks is commonly cited as the outer edge of a reliable
+  window). Attached unconditionally to every object in
+  `_get_scored_field()`, regardless of any filter or endpoint — pure
+  transparency, not gated behind a flag. This is a different kind of
+  "staleness" from the existing `data_stale` cache-age flag on
+  `/debris-field`: that one is about how long ago *this server* talked
+  to Celestrak (2hr cycle, already fine); `data_quality` is about how
+  old *that specific object's* own TLE epoch is, which re-fetching more
+  often cannot fix.
+- New `PlanRequest.max_tle_age_days` field (default `14.0`, inherited by
+  `ReplanRequest`). `_run_plan()` excludes objects with
+  `epoch_age_days > max_tle_age_days` before pool selection, same
+  filtering pattern already used for `removal_method_filter`. Applies
+  automatically at its default; the user can raise it (include
+  older/less-trusted debris) or lower it (be stricter) in either
+  direction — not a one-way tightening knob. `naive_route()` got the
+  same parameter and filter, so the naive baseline and the AI route
+  operate on the same data-quality window (same symmetry concern as the
+  earlier RAAN/depot naive-route fix). `/debris-field` and
+  `/debris/{norad_id}` deliberately never filter — they always show the
+  complete field with `data_quality` labels, so a user can see what's
+  old before deciding anything, independent of what threshold route
+  planning is using.
+- Also fixed, same commit: `test_target_norad_id_already_in_pool_no_duplicate`
+  had a flawed assumption — it picked the single top-risk object
+  system-wide and assumed it's always routable, which breaks whenever
+  the top-risk object happens to be classified `monitor_only` (as it
+  was on a live run: IRIDIUM 33 DEB, norad_id 46734). Fixed by
+  restricting the top-risk pick to non-`monitor_only` objects first.
+  This makes the test deterministic regardless of which object currently
+  ranks highest — a prior report attributed a since-passing run to
+  "live data rotated the object out," which undersold it: the fix is
+  what makes it pass reliably now, not which object Celestrak happens
+  to return on a given day.
+
+Verified: 2 new tests using synthetic injected objects (real live data
+can't guarantee a stale object exists at test time) confirm exclusion
+at the default threshold and inclusion once the threshold is raised
+past the object's age, for both `_run_plan()` and `naive_route()`.
+38/38 suite passing.
+
+Bugs found & fixed: 1 (pre-existing test assumption, see above; 0 new
+bugs in the feature itself).
