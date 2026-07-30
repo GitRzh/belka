@@ -260,7 +260,13 @@ def test_target_norad_id_forces_low_risk_object_into_pool(scored_field):
 
 
 def test_target_norad_id_already_in_pool_no_duplicate(scored_field):
-    top_object = sorted(scored_field, key=lambda o: o["risk_score"], reverse=True)[0]
+    # Top risk_score alone isn't enough -- a monitor_only object can outrank
+    # everything else (it happened live: IRIDIUM 33 DEB, norad_id 46734) but
+    # is never a valid route target. This test is about pool dedup, not
+    # about removal_method, so restrict to routable objects first.
+    routable = [o for o in scored_field if o["removal_method"] != METHOD_MONITOR_ONLY]
+    assert routable, "Need at least one non-monitor_only object for this test"
+    top_object = sorted(routable, key=lambda o: o["risk_score"], reverse=True)[0]
     baseline = _run_plan(PlanRequest(**DEFAULT_START, fuel_budget_km_s=10.0, pool_size=50))
     with_target = _run_plan(PlanRequest(**DEFAULT_START, fuel_budget_km_s=10.0, pool_size=50,
                                          target_norad_id=top_object["norad_id"]))
@@ -491,3 +497,251 @@ def test_explanation_fallback_on_groq_failure(monkeypatch):
             f"removal_method_explanation empty under failure for norad_id={o['norad_id']}"
         )
         assert o["removal_method_explanation_source"] == "fallback"
+
+
+# --------------------------------------------------------------------------- #
+# Item 8 -- data_quality label + max_tle_age_days filter
+# --------------------------------------------------------------------------- #
+
+_VALID_DATA_QUALITY_VALUES = {"fresh", "aging", "stale"}
+
+
+def test_every_object_has_data_quality_label(scored_field):
+    """data_quality must be present on every object from _get_scored_field(),
+    unconditionally, with a valid label value.  This is the 'always visible,
+    never filtered' transparency guarantee."""
+    for o in scored_field:
+        assert "data_quality" in o, f"data_quality missing on norad_id={o['norad_id']}"
+        assert o["data_quality"] in _VALID_DATA_QUALITY_VALUES, (
+            f"Unexpected data_quality value {o['data_quality']!r} on norad_id={o['norad_id']}"
+        )
+
+
+def test_data_quality_label_matches_epoch_age_days(scored_field):
+    """data_quality must be consistent with epoch_age_days per the documented
+    thresholds: < 7 = 'fresh', 7-14 = 'aging', > 14 = 'stale'."""
+    from app.main import _data_quality
+    for o in scored_field:
+        expected = _data_quality(o["epoch_age_days"])
+        assert o["data_quality"] == expected, (
+            f"data_quality mismatch: got {o['data_quality']!r}, "
+            f"expected {expected!r} for epoch_age_days={o['epoch_age_days']}"
+        )
+
+
+def test_stale_object_excluded_from_plan_at_default_threshold(monkeypatch):
+    """An object with epoch_age_days > 14 must be excluded from _run_plan()'s
+    candidate pool at the default max_tle_age_days=14, and included when
+    max_tle_age_days is raised past its age.
+
+    Strategy: monkeypatch _get_scored_field() to inject a synthetic stale
+    object (epoch_age_days=20.0) with a very high risk_score so it would be
+    first into the pool if not filtered, then confirm it's absent at default
+    threshold and present when the threshold is raised."""
+    import app.main as main_module
+    from app.main import _data_quality
+
+    # Build a synthetic stale object shaped like a real scored+enriched object.
+    stale_norad_id = 999_999_901  # guaranteed not in any real Celestrak field
+    stale_epoch_age = 20.0
+    stale_obj = {
+        "norad_id": stale_norad_id,
+        "name": "SYNTHETIC STALE DEB",
+        "altitude_km": 800.0,
+        "inclination_deg": 74.0,
+        "raan_deg": 0.0,
+        "latitude": 0.0,
+        "longitude": 0.0,
+        "bstar": 0.00001,
+        "epoch_age_days": stale_epoch_age,
+        "risk_score": 1.0,          # highest possible so it ranks into pool first
+        "proximity_score": 1.0,
+        "lifetime_score": 1.0,
+        "size_score": None,
+        "size_score_available": False,
+        "rcs_m2": None,
+        "object_type": "fragment",
+        "removal_method": "net_capture",
+        "possible_methods": ["net_capture"],
+        "method_maturity": {"net_capture": "flight_demonstrated"},
+        "removal_method_explanation": "stub",
+        "removal_method_explanation_source": "fallback",
+        "data_quality": _data_quality(stale_epoch_age),
+    }
+
+    real_field = _get_scored_field()
+    patched_field = [stale_obj] + real_field  # stale object first = highest risk rank
+
+    monkeypatch.setattr("app.main._get_scored_field", lambda **kw: patched_field)
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+
+    # At default threshold (14.0): stale object must not appear in the pool.
+    req_default = PlanRequest(**DEFAULT_START, fuel_budget_km_s=10.0, pool_size=50,
+                               nets_carried=5)
+    assert req_default.max_tle_age_days == 14.0, "Default must be 14.0"
+    result_default = _run_plan(req_default)
+    visited_ids_default = {d["norad_id"] for d in result_default["route_details"]}
+    assert stale_norad_id not in visited_ids_default, (
+        f"Stale object (epoch_age_days={stale_epoch_age}) appeared in route "
+        f"at default max_tle_age_days=14.0 -- filter not applied"
+    )
+
+    # With threshold raised above the object's age: it must now be eligible
+    # (not guaranteed visited since the optimizer still decides, but it must
+    # be in the pool -- verify via pool_size_used change or presence in the
+    # skipped_names if not visited).
+    req_raised = PlanRequest(**DEFAULT_START, fuel_budget_km_s=10.0, pool_size=50,
+                              nets_carried=5, max_tle_age_days=25.0)
+    result_raised = _run_plan(req_raised)
+    all_considered_ids = (
+        {d["norad_id"] for d in result_raised["route_details"]}
+        | {
+            # extract norad_id from skipped_names labels like "NAME (norad_id)"
+            int(m.group(1))
+            for label in result_raised.get("skipped_names", [])
+            for m in [__import__("re").search(r"\((\d+)\)$", label)]
+            if m
+        }
+    )
+    assert stale_norad_id in all_considered_ids, (
+        f"Stale object not in pool when max_tle_age_days=25.0 "
+        f"(epoch_age_days={stale_epoch_age}) -- filter too aggressive"
+    )
+
+
+def test_debris_field_endpoint_always_returns_stale_objects(monkeypatch):
+    """/debris-field must NOT filter by epoch_age_days -- stale objects must
+    always appear with their data_quality label intact, so users can browse
+    the full field and decide for themselves.  Prove this by injecting a
+    stale object and confirming it survives the listing endpoint unchanged."""
+    from app.main import _data_quality
+
+    stale_epoch_age = 30.0
+    stale_norad_id = 999_999_902
+    stale_obj = {
+        "norad_id": stale_norad_id,
+        "name": "SYNTHETIC STALE DEB2",
+        "altitude_km": 800.0,
+        "inclination_deg": 74.0,
+        "raan_deg": 0.0,
+        "latitude": 0.0,
+        "longitude": 0.0,
+        "bstar": 0.00001,
+        "epoch_age_days": stale_epoch_age,
+        "risk_score": 1.0,
+        "proximity_score": 1.0,
+        "lifetime_score": 1.0,
+        "size_score": None,
+        "size_score_available": False,
+        "rcs_m2": None,
+        "object_type": "fragment",
+        "removal_method": "net_capture",
+        "possible_methods": ["net_capture"],
+        "method_maturity": {"net_capture": "flight_demonstrated"},
+        "removal_method_explanation": "stub",
+        "removal_method_explanation_source": "fallback",
+        "data_quality": _data_quality(stale_epoch_age),
+    }
+
+    real_field = _get_scored_field()
+    patched_field = real_field + [stale_obj]
+
+    monkeypatch.setattr("app.main._get_scored_field", lambda **kw: patched_field)
+
+    # Call the actual debris_field endpoint function directly (not via HTTP).
+    from app.main import debris_field as debris_field_endpoint
+    response = debris_field_endpoint()
+
+    returned_ids = {o["norad_id"] for o in response["debris_field"]}
+    assert stale_norad_id in returned_ids, (
+        "Stale object was filtered out of /debris-field -- listing endpoint "
+        "must never apply max_tle_age_days filtering"
+    )
+    stale_in_response = next(o for o in response["debris_field"] if o["norad_id"] == stale_norad_id)
+    assert stale_in_response["data_quality"] == "stale"
+
+
+def test_naive_route_respects_max_tle_age_days(monkeypatch):
+    """naive_route() must exclude objects with epoch_age_days > max_tle_age_days,
+    the same way _run_plan() does -- so the naive baseline and the AI route
+    operate on the same data quality window."""
+    from app.main import _data_quality
+
+    stale_epoch_age = 20.0
+    stale_norad_id = 999_999_903
+    stale_obj = {
+        "norad_id": stale_norad_id,
+        "name": "SYNTHETIC STALE DEB3",
+        "altitude_km": 800.0,
+        "inclination_deg": 74.0,
+        "raan_deg": 0.0,
+        "latitude": 0.0,
+        "longitude": 0.0,
+        "bstar": 0.00001,
+        "epoch_age_days": stale_epoch_age,
+        "risk_score": 1.0,
+        "proximity_score": 1.0,
+        "lifetime_score": 1.0,
+        "size_score": None,
+        "size_score_available": False,
+        "rcs_m2": None,
+        "object_type": "fragment",
+        "removal_method": "net_capture",
+        "possible_methods": ["net_capture"],
+        "method_maturity": {"net_capture": "flight_demonstrated"},
+        "removal_method_explanation": "stub",
+        "removal_method_explanation_source": "fallback",
+        "data_quality": _data_quality(stale_epoch_age),
+    }
+
+    real_field = _get_scored_field()
+    patched_field = [stale_obj] + real_field
+
+    monkeypatch.setattr("app.main._get_scored_field", lambda **kw: patched_field)
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+
+    # At default threshold (14.0): stale object absent from naive route too.
+    result_default = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0,
+                                  pool_size=50, max_tle_age_days=14.0)
+    visited_names_default = {d["name"] for d in result_default["route_details"]}
+    assert stale_obj["name"] not in visited_names_default, (
+        "Stale object appeared in naive_route at max_tle_age_days=14.0 -- filter not applied"
+    )
+
+    # With raised threshold: the stale object is now eligible and must appear
+    # in the route (visited) or in the skipped count.  We use pool_size=2 so
+    # the pool is small enough that the stale object -- first in the patched
+    # field -- is guaranteed to rank in, not crowded out by 50 real objects.
+    result_raised = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0,
+                                 pool_size=2, max_tle_age_days=25.0)
+    visited_names_raised = {d["name"] for d in result_raised["route_details"]}
+    # The stale object has risk_score=1.0 so it's always in the top-2 pool.
+    # It will be visited or (if budget-exhausted) counted in skipped_count.
+    # Either way, pool_size_used should be 2 and include the stale object.
+    # Simplest verifiable invariant: the pool at raised threshold is larger
+    # than at tight threshold (pool_size=2 vs pool_size=2, both under 14 days
+    # the live field has enough objects, but with the stale object filtered
+    # out there are still >=2 real objects, so the difference is route content).
+    # Instead verify directly: pool_size=1 at default drops stale, =1 at
+    # raised includes stale (it's highest-risk so it's always slot 0).
+    result_tiny_default = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0,
+                                       pool_size=1, max_tle_age_days=14.0)
+    result_tiny_raised = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0,
+                                      pool_size=1, max_tle_age_days=25.0)
+    # At pool_size=1 + default threshold: the stale object is filtered out,
+    # so the sole pool slot goes to a real object -- not the stale one.
+    first_default_name = (result_tiny_default["route_details"][0]["name"]
+                          if result_tiny_default["route_details"] else
+                          result_tiny_default.get("skipped_names", [None])[0])
+    # At pool_size=1 + raised threshold: stale object is risk_score=1.0
+    # (highest), so it wins the single pool slot.
+    first_raised_name = (result_tiny_raised["route_details"][0]["name"]
+                         if result_tiny_raised["route_details"] else
+                         result_tiny_raised.get("skipped_names", [None])[0])
+    assert first_default_name != stale_obj["name"], (
+        "Stale object took pool slot at default threshold -- filter not applied"
+    )
+    assert first_raised_name == stale_obj["name"], (
+        f"Stale object did not take pool slot when max_tle_age_days=25.0 "
+        f"(got {first_raised_name!r}); filter is too aggressive or risk ranking broken"
+    )

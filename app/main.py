@@ -41,6 +41,24 @@ from fastapi.middleware.cors import CORSMiddleware
 # select_candidate_pool), so it's not a legal removal_method_filter value.
 _VALID_REMOVAL_METHOD_FILTERS = {METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE}
 
+# TLE data-quality thresholds (days from epoch).
+# Grounded in published TLE-accuracy literature: position error grows
+# ~1-3 km/day from epoch; the commonly cited reliable window is ~2 weeks.
+# "fresh" < 7 days, "aging" 7-14 days, "stale" > 14 days.
+_TLE_FRESH_DAYS = 7.0
+_TLE_AGING_DAYS = 14.0
+
+
+def _data_quality(epoch_age_days: float) -> str:
+    """Map epoch age (days) to a human-readable data-quality label.
+    Thresholds are grounded in published TLE-accuracy research -- do not
+    change without updating the Field description on max_tle_age_days."""
+    if epoch_age_days < _TLE_FRESH_DAYS:
+        return "fresh"
+    if epoch_age_days < _TLE_AGING_DAYS:
+        return "aging"
+    return "stale"
+
 # Module-level cache for removal method explanations.  Key is removal_method
 # (bare string) -- only 3 distinct values exist from removal_method.py, so
 # this cache is bounded at 3 entries and never grows unbounded.  Cached for
@@ -73,6 +91,11 @@ def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, f
     scored = score_debris_field(raw, weights=weights or DEFAULT_WEIGHTS)
     enriched = add_removal_methods(scored)
     for obj in enriched:
+        # data_quality is unconditional: every object gets the label
+        # regardless of which endpoint is calling or what filters are active.
+        # This gives /debris-field and /debris/{norad_id} full transparency,
+        # and gives _run_plan() a stable field to filter on.
+        obj["data_quality"] = _data_quality(obj.get("epoch_age_days", 0.0))
         explanation, source = _explain_removal_method(
             obj["removal_method"],
             obj.get("possible_methods", []),
@@ -94,6 +117,7 @@ class PlanRequest(BaseModel):
     nets_carried: int = Field(1, ge=1, description="Max net_capture stops in the route. Default 1 matches RemoveDEBRIS's actual flight history (it carried exactly one net) -- raise for an explicit exploratory what-if run.")
     removal_method_filter: Optional[str] = Field(None, description=f"Restrict the route to a single removal method -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}. No real ADR mission has flown mixed capture hardware (RemoveDEBRIS = net+harpoon only, ELSA-M = magnetic docking only), so this models 'one spacecraft, one hardware type'. Unset preserves the current mixed-method behavior.")
     target_norad_id: Optional[int] = Field(None, description="Force this object to be considered by the optimizer even if it wouldn't normally rank into the top pool_size by risk. The optimizer still decides whether to actually visit it (AddDisjunction still applies) -- this only guarantees consideration, not a visit. Rejected if the object is classified monitor_only (never a real target).")
+    max_tle_age_days: float = Field(14.0, description="Exclude objects whose TLE epoch is older than this many days from route planning. Default 14.0 matches published TLE-accuracy research (~2 week reliable window). Raise to include older/less-trusted debris, lower to be stricter. Does not affect /debris-field or /debris/{norad_id}, which always show the full field with data_quality labels.")
 
 
 class ReplanRequest(PlanRequest):
@@ -141,6 +165,15 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
                 ),
             )
         scored = [o for o in scored if o.get("removal_method") == req.removal_method_filter]
+
+    # Exclude objects whose TLE is too old to trust for route planning.
+    # data_quality label is always set upstream in _get_scored_field() --
+    # we filter on the raw epoch_age_days value directly so the threshold
+    # comparison is exact and not dependent on label string matching.
+    # /debris-field and /debris/{norad_id} intentionally skip this filter
+    # so users can see the full field with quality labels and decide for
+    # themselves; exclusion only applies where bad data causes bad decisions.
+    scored = [o for o in scored if o.get("epoch_age_days", 0.0) <= req.max_tle_age_days]
 
     # Filtering happens on `scored` (before pool selection) rather than
     # after, so select_candidate_pool's top-pool_size ranking is computed
@@ -676,12 +709,18 @@ def replan(req: ReplanRequest):
 
 
 @app.get("/naive-route")
-def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_budget_km_s: float, pool_size: int = DEFAULT_POOL_SIZE, start_raan_deg: float = 0.0):
+def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_budget_km_s: float, pool_size: int = DEFAULT_POOL_SIZE, start_raan_deg: float = 0.0, max_tle_age_days: float = 14.0):
     """Nearest-neighbor baseline for the naive-vs-AI comparison (Week 5 Day 35).
     Greedy: always hop to whatever's cheapest next, ignore risk entirely,
     stop once the next hop would blow the budget. This is the strawman the
     optimizer's smarter risk-vs-fuel tradeoff gets compared against."""
     scored = _get_scored_field()
+    # Apply the same TLE-age filter as _run_plan() so the naive baseline
+    # and the AI route operate on the same data quality window -- without
+    # this, naive_route could silently use stale objects that /plan excluded,
+    # making the comparison unfair.  Same reasoning as the earlier RAAN/depot
+    # symmetry fix.
+    scored = [o for o in scored if o.get("epoch_age_days", 0.0) <= max_tle_age_days]
     pool = select_candidate_pool(scored, pool_size=pool_size)
 
     from app.cost_matrix import build_cost_matrix
