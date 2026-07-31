@@ -39,6 +39,10 @@ Bugs found & fixed: 2
 
 Modules touched: 1 (C)
 
+Built via IBM Bob — recalled as fully Bob-built (user recollection from
+this session's checkpoint discussion, not independently re-verified
+against a diff; noted here as-is rather than left untracked).
+
 Wraps /plan with Groq-powered natural-language constraint parsing.
 openai/gpt-oss-20b extracts parameter overrides from free text (fuel budget,
 risk penalty, proximity/lifetime weights); openai/gpt-oss-120b explains the
@@ -319,6 +323,14 @@ Bugs found & fixed: 0 (clean addition).
 
 Modules touched: 2 (B) + main.py (no changes required)
 
+Built via IBM Bob — recalled as fully Bob-built (user recollection from
+this session's checkpoint discussion, not independently re-verified
+against a diff; noted here as-is rather than left untracked). Worth
+noting: this is the feature where the design-decision-first step was
+skipped (the model choice — wait-time vs. reroute vs. cost-correction —
+landed in code before it was discussed in chat), which is why the
+scope-wording finding below exists.
+
 Addresses one half of the "no phasing/timing" limitation flagged in
 prior checkpoints: predicting where a target's orbital plane will
 actually be by the time the spacecraft arrives, using elapsed mission
@@ -376,6 +388,11 @@ Bugs found & fixed: 0 (clean addition).
 
 Modules touched: 1 (frontend, `DebrisGlobe.jsx`)
 
+Built via IBM Bob — scoped prompt after design decisions (arc method,
+depot-leg treatment) were confirmed in chat; Bob's returned code was
+independently verified against the actual pushed commit (`0ca1846`), not
+just the summary Bob gave — see Verified note below.
+
 Route legs were previously drawn as a straight chord between two stop
 positions. Replaced with a new `slerpArc()` helper: spherical (slerp)
 interpolation for direction, radius linearly interpolated between the
@@ -414,6 +431,13 @@ in README.
 
 Modules touched: 2 (A: `tle_fetch.py`, `risk_score.py`)
 
+Built via IBM Bob — scoped prompt after locking weights and null-handling
+in chat first. One correction made before the prompt was written: the
+initial task-list research assumed CelesTrak's SATCAT exposed a
+categorical RCS_SIZE field (SMALL/MEDIUM/LARGE); the actual current field
+is a numeric `RCS` (m², nullable) — Space-Track's old scheme, not what
+CelesTrak serves today. Prompt was corrected before Bob touched any code.
+
 - `tle_fetch.py` — new `fetch_group_satcat()` queries CelesTrak's SATCAT
   `records.php` by the same `GROUP=` parameter and `DEBRIS_GROUPS` list
   already used for TLE fetches (3 requests total, not per-object).
@@ -450,6 +474,11 @@ Bugs found & fixed: 0 (clean addition).
 ## removal_method_explanation — LLM justification per technique
 
 Modules touched: 2 (C: `main.py`, B: `optimizer.py`)
+
+Built via IBM Bob — scoped prompt after locking the caching strategy
+(per-technique, not per-object) and fallback behavior in chat first. The
+`route_details` passthrough gap (see below) was caught during prompt
+design, before Bob touched code, not found afterward as a bug.
 
 - `main.py` — new `_explain_removal_method()`, cached by `removal_method`
   alone (bounded at 3 entries — only 3 distinct values exist). Calls
@@ -488,6 +517,14 @@ Bugs found & fixed: 0 (clean addition).
 ## TLE data-quality labeling + max_tle_age_days
 
 Modules touched: 1 (C: `main.py`)
+
+Built via IBM Bob — scoped prompt after locking thresholds (7/14 day,
+grounded in published TLE-accuracy research) and the two-way
+`max_tle_age_days` dial in chat first. One correction made during
+verification, not before the prompt: a report's explanation for why the
+previously-flaky test started passing ("live data rotated the object
+out") was misleading — the actual fix (below) is what made it
+deterministic, caught by reading the test source, not the stated reason.
 
 - New `_data_quality(epoch_age_days)` → `"fresh"` (< 7 days), `"aging"`
   (7-14), `"stale"` (> 14). Thresholds grounded in published
