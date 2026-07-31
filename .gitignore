@@ -48,3 +48,4 @@ app/test_pipeline_live.py
 plan_payload.json
 plan_payload_150.json
 replan_payload.json
+app/truncation_diagnostic.py

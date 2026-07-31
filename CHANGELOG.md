@@ -568,3 +568,34 @@ past the object's age, for both `_run_plan()` and `naive_route()`.
 
 Bugs found & fixed: 1 (pre-existing test assumption, see above; 0 new
 bugs in the feature itself).
+
+## Wait-time model evaluation (README only, no code change)
+
+Modules touched: 0 (documentation only)
+
+Documentation-only session, no application code changed. The RAAN-drift
+truncation behavior in `optimizer.py` (mid-route stop when a leg's
+drift-corrected cost exceeds remaining fuel) was already built and
+disclosed; this evaluated whether it's worth replacing with a wait-time
+model instead of leaving it disclosed.
+
+- Wrote a standalone, read-only diagnostic script that monkeypatches
+  `optimizer.transfer_delta_v`'s name binding (the exact call the
+  post-solve drift walk already makes internally) to log every leg cost
+  evaluated during `optimize_route()`, without duplicating or modifying
+  any of the real walk logic. Run locally against live Celestrak data
+  across 4 fuel budgets × 3 reps (12 runs).
+- Result: 9/12 runs truncated. Measured overages of 0.60–2.46 km/s
+  (median ~0.80 km/s, 25–77% over remaining budget) — an order of
+  magnitude larger than what a capped multi-day wait can plausibly claw
+  back from RAAN drift alone. Decision: do not build the wait-time
+  model; keep truncation as the correct, honest behavior.
+- Added a new bullet to README's "Known Scope Limitations" documenting
+  this measured finding, so the gap reads as an evaluated-and-rejected
+  decision rather than an unexamined limitation.
+- Fixed one wording issue while in the file: "We have not been able to
+  independently verify..." → "Have not been able to independently
+  verify..." (Mission Precedent section) — removed stray first-person
+  voice, no factual change.
+
+Bugs found & fixed: 0 (docs-only; no application code touched).
