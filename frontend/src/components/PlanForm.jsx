@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { api } from '../api'
 
 // Field split follows CHECKPOINT.txt's "FRONTEND UX NOTES":
 // required/always-visible vs advanced/collapsible.
@@ -6,6 +7,20 @@ import { useState } from 'react'
 const REMOVAL_METHOD_FILTER_OPTIONS = ['', 'robotic_arm_or_net_capture', 'net_capture']
 
 export default function PlanForm({ onSubmit, submitting }) {
+  // 'site' | 'raw' — which start-position mode is active
+  const [startMode, setStartMode] = useState('site')
+
+  // launch-site catalog fetched from GET /launch-sites
+  const [siteOptions, setSiteOptions] = useState([])
+  const [sitesLoading, setSitesLoading] = useState(true)
+
+  // launch-site form state
+  const [siteForm, setSiteForm] = useState({
+    launch_site: '',
+    inclination_deg: '',  // optional override; empty = use site default
+  })
+
+  // raw orbit form state (existing path, unchanged)
   const [required, setRequired] = useState({
     start_altitude_km: '',
     start_inclination_deg: '',
@@ -25,6 +40,26 @@ export default function PlanForm({ onSubmit, submitting }) {
     weights_json: '',
   })
 
+  useEffect(() => {
+    api.getLaunchSites()
+      .then((data) => {
+        // data is { cape_canaveral: {...}, vandenberg: {...}, ... }
+        const sorted = Object.entries(data).sort((a, b) =>
+          a[1].name.localeCompare(b[1].name)
+        )
+        setSiteOptions(sorted)
+        if (sorted.length > 0) {
+          setSiteForm((prev) => ({ ...prev, launch_site: sorted[0][0] }))
+        }
+        setSitesLoading(false)
+      })
+      .catch(() => {
+        // catalog unavailable — fall back to raw mode silently
+        setStartMode('raw')
+        setSitesLoading(false)
+      })
+  }, [])
+
   function updateRequired(field, value) {
     setRequired((prev) => ({ ...prev, [field]: value }))
   }
@@ -37,9 +72,21 @@ export default function PlanForm({ onSubmit, submitting }) {
     e.preventDefault()
 
     const payload = {
-      start_altitude_km: Number(required.start_altitude_km),
-      start_inclination_deg: Number(required.start_inclination_deg),
       fuel_budget_km_s: Number(required.fuel_budget_km_s),
+    }
+
+    if (startMode === 'site') {
+      // Launch-site path: send launch_site (+ optional inclination_deg).
+      // The backend model_validator resolves altitude/inclination/RAAN.
+      payload.launch_site = siteForm.launch_site
+      if (siteForm.inclination_deg !== '') {
+        payload.inclination_deg = Number(siteForm.inclination_deg)
+      }
+      // altitude defaults to 800 km on the backend when using launch_site
+    } else {
+      // Raw orbit path: existing behaviour, unchanged.
+      payload.start_altitude_km    = Number(required.start_altitude_km)
+      payload.start_inclination_deg = Number(required.start_inclination_deg)
     }
 
     if (advanced.pool_size) payload.pool_size = Number(advanced.pool_size)
@@ -63,26 +110,90 @@ export default function PlanForm({ onSubmit, submitting }) {
 
   return (
     <form className="mission-form" onSubmit={handleSubmit}>
-      <label className="field">
-        Start altitude (km)
-        <input
-          type="number"
-          required
-          value={required.start_altitude_km}
-          onChange={(e) => updateRequired('start_altitude_km', e.target.value)}
-        />
-      </label>
 
-      <label className="field">
-        Start inclination (deg)
-        <input
-          type="number"
-          required
-          value={required.start_inclination_deg}
-          onChange={(e) => updateRequired('start_inclination_deg', e.target.value)}
-        />
-      </label>
+      {/* ── Start position toggle ─────────────────────────────────── */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          className={`btn btn-toggle${startMode === 'site' ? ' btn-primary' : ''}`}
+          style={{ flex: 1 }}
+          onClick={() => setStartMode('site')}
+        >
+          Launch site
+        </button>
+        <button
+          type="button"
+          className={`btn btn-toggle${startMode === 'raw' ? ' btn-primary' : ''}`}
+          style={{ flex: 1 }}
+          onClick={() => setStartMode('raw')}
+        >
+          Custom orbit
+        </button>
+      </div>
 
+      {/* ── Launch-site mode ─────────────────────────────────────── */}
+      {startMode === 'site' && (
+        <>
+          <label className="field">
+            Launch site
+            <select
+              required
+              value={siteForm.launch_site}
+              disabled={sitesLoading}
+              onChange={(e) =>
+                setSiteForm((prev) => ({ ...prev, launch_site: e.target.value }))
+              }
+            >
+              {sitesLoading && <option value="">Loading…</option>}
+              {siteOptions.map(([key, site]) => (
+                <option key={key} value={key}>
+                  {site.name} — min {site.min_inclination}° incl, {site.lat}° lat
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field">
+            Inclination override (deg, optional)
+            <input
+              type="number"
+              step="0.1"
+              placeholder={`Leave blank — uses site minimum`}
+              value={siteForm.inclination_deg}
+              onChange={(e) =>
+                setSiteForm((prev) => ({ ...prev, inclination_deg: e.target.value }))
+              }
+            />
+          </label>
+        </>
+      )}
+
+      {/* ── Raw orbit mode (existing fields, unchanged) ───────────── */}
+      {startMode === 'raw' && (
+        <>
+          <label className="field">
+            Start altitude (km)
+            <input
+              type="number"
+              required
+              value={required.start_altitude_km}
+              onChange={(e) => updateRequired('start_altitude_km', e.target.value)}
+            />
+          </label>
+
+          <label className="field">
+            Start inclination (deg)
+            <input
+              type="number"
+              required
+              value={required.start_inclination_deg}
+              onChange={(e) => updateRequired('start_inclination_deg', e.target.value)}
+            />
+          </label>
+        </>
+      )}
+
+      {/* ── Fuel budget — always visible ─────────────────────────── */}
       <label className="field">
         Fuel budget (km/s)
         <input
@@ -94,6 +205,7 @@ export default function PlanForm({ onSubmit, submitting }) {
         />
       </label>
 
+      {/* ── Advanced options — unchanged from before ─────────────── */}
       <button type="button" className="btn" onClick={() => setAdvancedOpen((o) => !o)}>
         {advancedOpen ? 'Hide advanced options' : 'Advanced options'}
       </button>

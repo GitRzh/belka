@@ -7,6 +7,7 @@
 | C | `main.py` | FastAPI layer |
 | D | `removal_method.py` | Removal-method classification |
 | E | `_explain_plan()` in `main.py` | LLM mission-briefing narration |
+| F | `launch_sites.py` | Launch-site catalog + deterministic start-orbit derivation |
 
 ## Modules A, B, C (initial build)
 
@@ -599,3 +600,128 @@ model instead of leaving it disclosed.
   voice, no factual change.
 
 Bugs found & fixed: 0 (docs-only; no application code touched).
+
+## Launch-site selection (start orbit as site choice, /plan + /replan)
+
+Modules touched: 3 (new: F — `launch_sites.py`; edited: C — `main.py`) + frontend
+
+Built via IBM Bob — design decisions locked in chat before any code was
+written, then re-verified against real source at every step rather than
+trusting status claims. Six real issues were caught and fixed during the
+pre-implementation and implementation passes, not found afterward as bugs.
+
+- New Module F (`launch_sites.py`) — `LAUNCH_SITES` catalog of five real
+  spaceports (Cape Canaveral, Vandenberg, Kourou, Baikonur, Sriharikota)
+  with lat/lon and `min_inclination` (set equal to the site's latitude —
+  the physically correct minimum achievable inclination for a due-east
+  launch, not an arbitrary number). New `derive_start_orbit(site_key,
+  inclination=None, altitude_km=800)` floors any requested inclination at
+  the site's minimum, approximates RAAN as the site's longitude at launch
+  (no standalone RAAN-from-longitude helper existed for debris objects to
+  reuse — debris RAAN is read straight off SGP4's `nodeo`, an inertial
+  angle, not a ground-longitude derivation — so this is a new, separately
+  justified approximation), and returns the same three-field shape
+  (`altitude_km`/`inclination_deg`/`raan_deg`) the existing raw
+  `start_position` fields already use downstream.
+- Module C (`main.py`) — `PlanRequest` gains `launch_site: Optional[str]`
+  and `inclination_deg: Optional[float]` (both must be declared fields,
+  not left to survive Pydantic's default `extra="ignore"` behavior — an
+  undeclared `inclination_deg` would have been silently stripped before
+  validation ever saw it). `start_altitude_km`/`start_inclination_deg`
+  changed from required to `Optional[float]`, gated by a new
+  `resolve_launch_site()` `model_validator(mode="before")`: if
+  `launch_site` is present and the raw fields aren't already populated, it
+  calls `derive_start_orbit()` and injects the three fields; if neither
+  `launch_site` nor the raw fields are present, it raises (surfaced by
+  FastAPI as a 422); otherwise it passes through unchanged. This runs
+  identically for `/plan` and `/replan` since `ReplanRequest` inherits
+  `PlanRequest`'s validator — no duplicated detection logic.
+  `optimizer.py`/`delta_v.py` are untouched; they still just see a plain
+  circular starting orbit. New `GET /launch-sites` returns the catalog for
+  the frontend dropdown.
+- `/replan`'s existing free-text override parser gains `launch_site` as an
+  allowed key: the LLM is prompted with the current site and the five
+  valid keys, instructed to omit the key entirely if the text doesn't
+  clearly name one of the five. A defensive check on the code side treats
+  any value it returns that isn't a known key (`None`, a valid key, or
+  anything else) as "no site change" rather than raising — `/replan` is an
+  interactive natural-language surface, not a structured-data endpoint, so
+  a hallucinated or unmatched site name is silently dropped, not a 422.
+  The hard validation gate stays where it belongs: `PlanRequest`'s
+  validator still rejects a request that ends up with neither a valid
+  `launch_site` nor raw orbit fields. When merging LLM-parsed overrides
+  into the next request, `launch_site` in the overrides forces the three
+  raw fields to `None` first so the validator is compelled to re-resolve
+  against the new site — without this, a genuine site-change request would
+  have silently kept the old orbit, since the validator (correctly)
+  short-circuits when raw fields are already populated to avoid redundant
+  re-resolution on every ordinary weight-only replan. `_explain_diff()`
+  narrates a site change as its own sentence, separate from weight-change
+  narration, via a new `site_change` key in the diff dict it already
+  receives.
+- Frontend (`api.js`, `PlanForm.jsx`) — `getLaunchSites()` added;
+  `PlanForm.jsx` gets a toggle between "Launch site" (dropdown populated
+  from `GET /launch-sites`) and "Custom orbit" (the existing raw-field
+  inputs, untouched). Only this one component's markup/state changed — no
+  other component's handler or prop logic was touched, same scoping
+  discipline as the earlier mission-dashboard pass.
+
+Six issues caught and fixed before/during implementation, all against real
+source, not assumption:
+1. `start_altitude_km`/`start_inclination_deg` were `Field(...)` (required)
+   — confirmed before assuming a raw-dict-bypass approach would be needed;
+   made `Optional` with validator-enforced cross-field logic instead,
+   which preserves FastAPI's automatic request docs and doesn't require
+   duplicating JSON-parsing boilerplate across two endpoints.
+2. Confirmed `/replan`'s override-merge path constructs a genuinely new
+   `PlanRequest(**merged_dict)` (real Pydantic re-validation) rather than
+   mutating the existing request object's attributes — the latter would
+   have meant `model_validator(mode="before")` never re-fires on a site
+   change, since it only runs at construction time.
+3. The idempotent "skip re-resolution if raw fields already populated"
+   guard (needed so weight-only replans don't waste a redundant
+   `derive_start_orbit()` call) would have also masked a genuine
+   `launch_site` override coming from the LLM parser, since
+   `req.model_dump()` already carries the previously-resolved raw fields.
+   Fixed by nulling the three raw fields whenever `launch_site` appears in
+   the parsed overrides, forcing re-resolution specifically on an actual
+   site change.
+4. `inclination_deg` was initially treated as a key that would just
+   "survive" into the pre-validation dict without being a declared field —
+   confirmed the model's `extra` config is Pydantic v2's default
+   (`ignore`), which silently strips undeclared keys before validators
+   ever see them. Declared both `launch_site` and `inclination_deg` as
+   real `Optional` fields instead of widening `extra` to `"allow"`, which
+   would have opened the door to arbitrary unknown keys on every request —
+   a much larger, unintended surface than this feature needed.
+5. The original `/replan` unknown-site handling raised a 422 whenever the
+   LLM returned any value not in `LAUNCH_SITES` — conflating "the LLM
+   hallucinated/genuinely malformed a key" with "the user's free text
+   didn't clearly name a site," which the design explicitly calls for
+   handling as a silent no-op, not an error. Replaced the single
+   not-in-check with a three-way branch (`None` → explicit no-change;
+   known key → apply; anything else → log + silently drop), confirmed via
+   a new end-to-end `TestClient` test driving `/replan` itself with a
+   mocked hallucinated key, asserting `200` and the key absent from
+   `overrides_applied` — not just a unit test on the parser in isolation.
+6. Confirmed the "no site mentioned" case reaches `_ALLOWED_OVERRIDE_KEYS`
+   filtering as a genuinely *absent* key (not a key present with value
+   `None`) by reading `_parse_overrides`'s actual gating logic — meaning a
+   weight-only replan can never accidentally null out a previously-set
+   site, since the resolution branch only runs when `"launch_site" in
+   parsed` is true at all.
+
+Verified: 30 new tests in `app/test_launch_sites.py`, covering
+`derive_start_orbit()` directly (inclination floor enforced, unknown
+`site_key` raises clearly) and `/replan`'s free-text path end-to-end
+(site-only change, weight-only change, both together, unlisted/hallucinated
+site silently dropped — not 422, no site mentioned leaves `start_position`
+untouched, and a weight-only replan issued *after* an earlier site-set
+confirms all three of `start_altitude_km`/`start_inclination_deg`/
+`start_raan_deg` stay exactly unchanged). Existing raw-orbit `start_position`
+path re-confirmed as a regression check — unchanged behavior. Full suite:
+42 → 72 passing (0 failures), delta matches the 30 new tests exactly.
+`vite build` clean (0 warnings, 0 errors) after the frontend changes.
+
+Bugs found & fixed: 6 (all caught pre-ship via the design-lock-then-verify
+pattern — see numbered list above; 0 shipped and found later).

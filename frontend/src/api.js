@@ -30,6 +30,8 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  getLaunchSites: () => request('/launch-sites'),
+
   getDebrisField: () => request('/debris-field'),
 
   getDebrisById: (noradId) => request(`/debris/${noradId}`),

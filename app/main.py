@@ -26,11 +26,12 @@ from typing import Any, Optional
 import groq as groq_module
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 load_dotenv()
 
 from app.tle_fetch import get_debris_field, get_cache_timestamp, CACHE_MAX_AGE_SECONDS
+from app.launch_sites import LAUNCH_SITES, derive_start_orbit
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE
 from app.optimizer import optimize_route, RISK_PENALTY_SCALE
@@ -77,6 +78,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/launch-sites")
+def launch_sites_catalog():
+    """Return the fixed launch-site catalog for frontend consumption.
+    Each entry contains name, lat, lon, and min_inclination."""
+    return {
+        key: {
+            "name":            site["name"],
+            "lat":             site["lat"],
+            "lon":             site["lon"],
+            "min_inclination": site["min_inclination"],
+        }
+        for key, site in LAUNCH_SITES.items()
+    }
+
+
 def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, float]] = None) -> list[dict[str, Any]]:
     """Shared by /debris-field, /debris/{norad_id}, and /plan/replan so
     there's one place that does fetch+score+classify. object_type/
@@ -107,8 +123,34 @@ def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, f
 
 
 class PlanRequest(BaseModel):
-    start_altitude_km: float = Field(..., description="Spacecraft's current orbit altitude, km")
-    start_inclination_deg: float = Field(..., description="Spacecraft's current orbit inclination, deg")
+    # --- launch-site alternative input (mutually exclusive with raw start fields) ---
+    launch_site: Optional[str] = Field(
+        None,
+        description=(
+            "Launch site key, one of: "
+            + ", ".join(sorted(LAUNCH_SITES))
+            + ". Mutually exclusive with providing start_altitude_km/"
+            "start_inclination_deg directly — supply one or the other."
+        ),
+    )
+    inclination_deg: Optional[float] = Field(
+        None,
+        description=(
+            "Desired orbital inclination (deg) when using launch_site. "
+            "Clamped to site's min_inclination (= site latitude) if lower. "
+            "Ignored when start_inclination_deg is supplied directly."
+        ),
+    )
+
+    # --- raw start-orbit fields (required when launch_site is absent) ---
+    start_altitude_km: Optional[float] = Field(
+        None,
+        description="Spacecraft's current orbit altitude, km. Required unless launch_site is supplied.",
+    )
+    start_inclination_deg: Optional[float] = Field(
+        None,
+        description="Spacecraft's current orbit inclination, deg. Required unless launch_site is supplied.",
+    )
     start_raan_deg: float = Field(0.0, description="Spacecraft's current orbit RAAN, deg. Defaults to 0.0 if the caller doesn't know their spacecraft's current RAAN, which re-enables the pre-RAAN |incl1-incl2| approximation for depot hops only -- every debris-to-debris leg already uses real RAAN values from tle_fetch.py regardless.")
     fuel_budget_km_s: float = Field(..., gt=0, description="Total delta-v budget for the mission, km/s")
     pool_size: int = Field(DEFAULT_POOL_SIZE, gt=0, description="How many top-risk candidates the optimizer considers")
@@ -118,6 +160,40 @@ class PlanRequest(BaseModel):
     removal_method_filter: Optional[str] = Field(None, description=f"Restrict the route to a single removal method -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}. No real ADR mission has flown mixed capture hardware (RemoveDEBRIS = net+harpoon only, ELSA-M = magnetic docking only), so this models 'one spacecraft, one hardware type'. Unset preserves the current mixed-method behavior.")
     target_norad_id: Optional[int] = Field(None, description="Force this object to be considered by the optimizer even if it wouldn't normally rank into the top pool_size by risk. The optimizer still decides whether to actually visit it (AddDisjunction still applies) -- this only guarantees consideration, not a visit. Rejected if the object is classified monitor_only (never a real target).")
     max_tle_age_days: float = Field(14.0, description="Exclude objects whose TLE epoch is older than this many days from route planning. Default 14.0 matches published TLE-accuracy research (~2 week reliable window). Raise to include older/less-trusted debris, lower to be stricter. Does not affect /debris-field or /debris/{norad_id}, which always show the full field with data_quality labels.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_launch_site(cls, data: Any) -> Any:
+        """Resolve launch_site -> start_altitude/inclination/raan before field
+        validation, or enforce that the raw fields are present when no site is
+        given.  Idempotent: if start_altitude_km and start_inclination_deg are
+        already populated (e.g. a second construction from model_dump()), the
+        call is skipped even when launch_site is present."""
+        if not isinstance(data, dict):
+            return data
+
+        has_site = data.get("launch_site") is not None
+        has_alt  = data.get("start_altitude_km") is not None
+        has_incl = data.get("start_inclination_deg") is not None
+
+        if has_site and not (has_alt and has_incl):
+            # Fresh launch-site resolution — raw fields not yet populated.
+            orbit = derive_start_orbit(
+                data["launch_site"],
+                inclination=data.get("inclination_deg"),
+                altitude_km=data.get("start_altitude_km") or 800,
+            )
+            data["start_altitude_km"]    = orbit["altitude_km"]
+            data["start_inclination_deg"] = orbit["inclination_deg"]
+            data["start_raan_deg"]        = orbit["raan_deg"]
+        elif not has_site and not (has_alt and has_incl):
+            raise ValueError(
+                "Either launch_site or both start_altitude_km and "
+                "start_inclination_deg must be provided."
+            )
+        # else: raw fields already present (raw-orbit path), or site + raw
+        # both present (already resolved from a prior construction) — pass through.
+        return data
 
 
 class ReplanRequest(PlanRequest):
@@ -267,12 +343,14 @@ def plan(req: PlanRequest):
 # groq==0.11.0 supports response_format={"type": "json_object"} only (no
 # json_schema mode). The JSON schema is described in the system prompt instead.
 _GROQ_TIMEOUT = 20.0
-_ALLOWED_OVERRIDE_KEYS = {"fuel_budget_km_s", "risk_penalty_scale", "weights", "removal_method_filter", "no_changes"}
+_ALLOWED_OVERRIDE_KEYS = {"fuel_budget_km_s", "risk_penalty_scale", "weights", "removal_method_filter", "no_changes", "launch_site", "inclination_deg"}
 
 def _build_parse_prompt(req: "PlanRequest") -> str:
     """Build the system prompt with current parameter values embedded so the
     model can resolve relative instructions like 'cut in half' or 'double it'."""
     base_weights = req.weights or DEFAULT_WEIGHTS
+    current_site = req.launch_site or "(none — raw orbit)"
+    site_keys = sorted(LAUNCH_SITES.keys())
     return (
         "You are a parameter-extraction assistant for an orbital debris removal mission planner. "
         "The mission currently has these parameter values:\n"
@@ -282,6 +360,8 @@ def _build_parse_prompt(req: "PlanRequest") -> str:
         f"  weights.lifetime   = {base_weights.get('lifetime',  DEFAULT_WEIGHTS['lifetime'])}  (also called: lifetime weight, drag weight)\n"
         f"  removal_method_filter = {req.removal_method_filter!r}  (also called: capture method, hardware type; "
         f"valid values are {sorted(_VALID_REMOVAL_METHOD_FILTERS)} or null for no filter/mixed methods)\n"
+        f"  launch_site = {current_site!r}  (the spacecraft's launch site; "
+        f"valid keys are exactly: {site_keys})\n"
         "\n"
         "From the user's message, extract ONLY the parameters they want to change and output a single valid JSON object. "
         "The only keys you may emit are:\n"
@@ -289,12 +369,17 @@ def _build_parse_prompt(req: "PlanRequest") -> str:
         "  risk_penalty_scale -- non-negative float\n"
         "  weights            -- object with keys 'proximity' (float 0-1) and/or 'lifetime' (float 0-1)\n"
         f"  removal_method_filter -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}, or null to clear an existing filter\n"
+        f"  launch_site -- one of {site_keys} if the user clearly names a different launch site; "
+        "omit entirely if the user does not mention a site change\n"
         "\n"
         "Rules:\n"
         "- Resolve relative instructions using the current values shown above "
         "(e.g. 'cut in half' -> divide the current value by 2; 'double it' -> multiply by 2; "
         "'reduce by 20%' -> multiply by 0.8).\n"
         "- Omit any key the user did not mention.\n"
+        "- For launch_site: only emit it when the user clearly names one of the five listed sites. "
+        "If the user names a real location that is NOT in the list, do NOT guess or invent a key — "
+        "omit launch_site entirely.\n"
         "- If the message contains no recognisable parameter change at all, return exactly {\"no_changes\": true}.\n"
         "- Output ONLY the JSON object -- no prose, no markdown."
     )
@@ -433,6 +518,9 @@ def _explain_diff(diff: dict[str, Any]) -> str:
         "on a 0-1 scale (e.g. -0.894 means fuel usage dropped by 89.4 percentage points, not "
         "0.894%). Express it as percentage points (multiply by 100) or describe it using the "
         "actual fuel_used_fraction values from old_plan/new_plan if they are present. "
+        "If site_change is present in the diff, describe the launch-site change "
+        "(old site -> new site) and the resulting inclination/RAAN shift as a SEPARATE sentence "
+        "from any weight or parameter changes — do not merge the two into one sentence. "
         "Output only the explanation -- no JSON, no markdown.\n\n"
         + json.dumps(diff)
     )
@@ -644,6 +732,29 @@ def replan(req: ReplanRequest):
             )
         overrides["removal_method_filter"] = v  # None is a valid, meaningful override (clears the filter)
 
+    if "launch_site" in parsed:
+        v = parsed["launch_site"]
+        if v is None:
+            # Explicit null from the LLM means "clear the site" — treat as
+            # no site on the new request (raw fields will carry through from
+            # model_dump since they're already resolved on req).
+            overrides["launch_site"] = None
+        elif v in LAUNCH_SITES:
+            # Known key — valid site change.
+            overrides["launch_site"] = v
+            if "inclination_deg" in parsed:
+                overrides["inclination_deg"] = parsed["inclination_deg"]
+        else:
+            # Unknown key: LLM hallucinated or partially matched a location
+            # not in the five-site catalog.  Per design: silently ignore,
+            # leave start_position unchanged.  Do NOT raise 422 — this is
+            # unmatched user free text routed through the parser, not a
+            # malformed direct API call.
+            logger.warning(
+                "[replan] launch_site from LLM %r is not in LAUNCH_SITES — ignoring",
+                v,
+            )
+
     # ------------------------------------------------------------------ #
     # Step 4 -- compute old plan (original params) and new plan (merged)  #
     # ------------------------------------------------------------------ #
@@ -652,6 +763,13 @@ def replan(req: ReplanRequest):
 
     new_req_data = req.model_dump()
     new_req_data.update(overrides)
+    if "launch_site" in overrides:
+        # Intentional site change from the LLM parser: null out the already-
+        # resolved raw fields so the model_validator re-derives them from the
+        # new site key.  Without this the validator's idempotency guard would
+        # see the old populated values and skip re-resolution.
+        new_req_data["start_altitude_km"]    = None
+        new_req_data["start_inclination_deg"] = None
     # ReplanRequest has user_request_text; PlanRequest doesn't -- strip it
     new_req_data.pop("user_request_text", None)
     new_req = PlanRequest(**new_req_data)
@@ -676,6 +794,20 @@ def replan(req: ReplanRequest):
             new_plan["fuel_used_fraction"] - old_plan["fuel_used_fraction"], 4
         ),
     }
+
+    # If the launch site changed, add a site_change entry to the diff so
+    # _explain_diff()'s LLM prompt can describe it as a separate sentence.
+    old_site = req.launch_site
+    new_site = new_req.launch_site
+    if old_site != new_site:
+        diff["site_change"] = {
+            "old_site": old_site,
+            "new_site": new_site,
+            "old_inclination_deg": req.start_inclination_deg,
+            "new_inclination_deg": new_req.start_inclination_deg,
+            "old_raan_deg": req.start_raan_deg,
+            "new_raan_deg": new_req.start_raan_deg,
+        }
 
     # ------------------------------------------------------------------ #
     # Step 6 -- ask large LLM for plain-language explanation (diff only)  #
