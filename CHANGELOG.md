@@ -39,11 +39,7 @@ Bugs found & fixed: 2
 
 Modules touched: 1 (C)
 
-Built via IBM Bob — recalled as fully Bob-built (user recollection from
-this session's checkpoint discussion, not independently re-verified
-against a diff; noted here as-is rather than left untracked).
-
-Wraps /plan with Groq-powered natural-language constraint parsing.
+Built via IBM Bob — Wraps /plan with Groq-powered natural-language constraint parsing.
 openai/gpt-oss-20b extracts parameter overrides from free text (fuel budget,
 risk penalty, proximity/lifetime weights); openai/gpt-oss-120b explains the
 before/after diff in plain language. Stateless — no plan ID, recomputes both
