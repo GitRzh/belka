@@ -841,11 +841,54 @@ def replan(req: ReplanRequest):
 
 
 @app.get("/naive-route")
-def naive_route(start_altitude_km: float, start_inclination_deg: float, fuel_budget_km_s: float, pool_size: int = DEFAULT_POOL_SIZE, start_raan_deg: float = 0.0, max_tle_age_days: float = 14.0):
+def naive_route(
+    fuel_budget_km_s: float,
+    start_altitude_km: Optional[float] = None,
+    start_inclination_deg: Optional[float] = None,
+    launch_site: Optional[str] = None,
+    inclination_deg: Optional[float] = None,
+    pool_size: int = DEFAULT_POOL_SIZE,
+    start_raan_deg: float = 0.0,
+    max_tle_age_days: float = 14.0,
+):
     """Nearest-neighbor baseline for the naive-vs-AI comparison (Week 5 Day 35).
     Greedy: always hop to whatever's cheapest next, ignore risk entirely,
     stop once the next hop would blow the budget. This is the strawman the
     optimizer's smarter risk-vs-fuel tradeoff gets compared against."""
+    # --- launch_site / raw-orbit resolution (mirrors resolve_launch_site) ---
+    has_site = launch_site is not None
+    has_alt  = start_altitude_km is not None
+    has_incl = start_inclination_deg is not None
+
+    if has_site and not (has_alt and has_incl):
+        # Resolve via launch site; reject unknown keys immediately (not an LLM
+        # caller, so we never silently drop bad input like /replan does).
+        if launch_site not in LAUNCH_SITES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Unknown launch site {launch_site!r}. "
+                    f"Valid keys: {sorted(LAUNCH_SITES)}"
+                ),
+            )
+        orbit = derive_start_orbit(
+            launch_site,
+            inclination=inclination_deg,
+            altitude_km=start_altitude_km or 800,
+        )
+        start_altitude_km    = orbit["altitude_km"]
+        start_inclination_deg = orbit["inclination_deg"]
+        start_raan_deg        = orbit["raan_deg"]
+    elif not has_site and not (has_alt and has_incl):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Either launch_site or both start_altitude_km and "
+                "start_inclination_deg must be provided."
+            ),
+        )
+    # --- end resolution ---
+
     scored = _get_scored_field()
     # Apply the same TLE-age filter as _run_plan() so the naive baseline
     # and the AI route operate on the same data quality window -- without

@@ -1,8 +1,5 @@
 """
-pytest suite for the 6 new-feature items from CHECKPOINT.txt, plus:
-  7. removal_method_explanation (main.py + optimizer.py)
-     -- LLM-generated justification per technique, cached, with fallback.
-
+pytest suite for the 7 new-feature items from CHECKPOINT.txt:
   1. method_maturity + possible_methods split       (removal_method.py)
   2. nets_carried cap                                (optimizer.py)
   3. removal_method_filter                           (main.py + /replan)
@@ -10,6 +7,7 @@ pytest suite for the 6 new-feature items from CHECKPOINT.txt, plus:
   5. target_norad_id                                  (main.py)
   6. /naive-route explanation parity                  (main.py)
   7. removal_method_explanation                       (main.py + optimizer.py)
+     -- LLM-generated justification per technique, cached, with fallback.
 
 Most tests hit the LIVE Celestrak pipeline (same as test_pipeline_live.py) --
 they need real network access and, for the /naive-route explanation tests
@@ -20,6 +18,8 @@ so they're fast, free, and don't flake on rate limits.
 
 Run: pytest app/test_new_features.py -v
 """
+from typing import Any
+
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -40,7 +40,7 @@ from app.removal_method import (
     MATURITY_OPERATIONAL,
 )
 
-DEFAULT_START = dict(start_altitude_km=800.0, start_inclination_deg=74.0)
+DEFAULT_START: dict[str, Any] = dict(start_altitude_km=800.0, start_inclination_deg=74.0)
 
 
 @pytest.fixture(scope="module")

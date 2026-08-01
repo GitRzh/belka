@@ -725,3 +725,39 @@ path re-confirmed as a regression check — unchanged behavior. Full suite:
 
 Bugs found & fixed: 6 (all caught pre-ship via the design-lock-then-verify
 pattern — see numbered list above; 0 shipped and found later).
+
+## `/naive-route` gains `launch_site` parity (closes naive-vs-AI symmetry gap)
+
+Modules touched: 1 (C — `main.py`)
+
+`/naive-route` didn't accept `launch_site` the way `/plan`/`/replan` do — a real
+symmetry gap flagged as an open item when the launch-site feature shipped:
+naive-vs-AI comparisons couldn't be run against a launch-site-based start orbit
+at all.
+
+- `naive_route()` signature: `start_altitude_km`/`start_inclination_deg` changed
+  from required to `Optional[float] = None`; added `launch_site: Optional[str]`
+  and `inclination_deg: Optional[float]`. `fuel_budget_km_s` promoted to first
+  positional param (still required, unchanged semantics).
+- Resolution logic added at the top of `naive_route()`, mirroring (not reusing —
+  this is a plain query-param function, not a Pydantic model)
+  `PlanRequest.resolve_launch_site`'s intent: `launch_site` given + raw fields
+  absent → validated against `LAUNCH_SITES` immediately, `derive_start_orbit()`'s
+  `ValueError` caught and re-raised as `HTTPException(422, ...)`; neither
+  `launch_site` nor both raw fields given → `HTTPException(422, ...)`; unknown
+  site key → `HTTPException(422, ...)` listing valid keys — deliberately **not**
+  the silent-drop behavior `/replan`'s LLM-facing parser uses, since this is a
+  direct API caller, not LLM output.
+- Downstream depot construction and route logic unchanged — `derive_start_orbit()`
+  output is written into the same three fields the raw-orbit path already
+  populated.
+
+Verified: 5 new tests in `app/test_launch_sites.py`
+(`TestNaiveRouteLaunchSite`) — site-only call succeeds; missing both site and
+raw fields → 422; unknown site key → 422 (not silently dropped); raw-fields-only
+path unchanged (regression); site-derived depot orbit matches
+`derive_start_orbit()` called directly (parity check, no LLM in this path).
+Full suite: 30 → 35 in this test file, 0 failures.
+
+Bugs found & fixed: 0 shipped — this closes a known, already-disclosed follow-up
+item from the launch-site feature, not a newly discovered bug.

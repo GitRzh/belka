@@ -482,5 +482,92 @@ class TestLaunchSitesEndpoint(unittest.TestCase):
                 self.assertIn(field, entry, f"{key} missing field {field!r}")
 
 
+# ---------------------------------------------------------------------------
+# 6. /naive-route launch_site support
+# ---------------------------------------------------------------------------
+
+class TestNaiveRouteLaunchSite(unittest.TestCase):
+    """Tests for the launch_site capability added to /naive-route."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        self.client = TestClient(app)
+        # Patch _get_scored_field so no Celestrak fetch is needed.
+        self._scored_patcher = patch(
+            "app.main._get_scored_field",
+            return_value=[],
+        )
+        self._scored_patcher.start()
+
+    def tearDown(self):
+        self._scored_patcher.stop()
+
+    def test_site_only_call_succeeds(self):
+        """GET /naive-route?launch_site=kourou&fuel_budget_km_s=3.5 → 200."""
+        resp = self.client.get(
+            "/naive-route",
+            params={"launch_site": "kourou", "fuel_budget_km_s": 3.5},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_neither_site_nor_raw_fields_gives_422(self):
+        """Omitting both launch_site and start_altitude/inclination → 422."""
+        resp = self.client.get(
+            "/naive-route",
+            params={"fuel_budget_km_s": 3.5},
+        )
+        self.assertEqual(resp.status_code, 422)
+        detail = resp.json().get("detail", "")
+        self.assertIn("launch_site", detail)
+        self.assertIn("start_altitude_km", detail)
+
+    def test_unknown_site_key_gives_422_not_silent_drop(self):
+        """An unknown launch_site value must raise 422 listing valid keys."""
+        resp = self.client.get(
+            "/naive-route",
+            params={"launch_site": "plesetsk_cosmodrome", "fuel_budget_km_s": 3.5},
+        )
+        self.assertEqual(resp.status_code, 422)
+        detail = resp.json().get("detail", "")
+        self.assertIn("plesetsk_cosmodrome", detail)
+        self.assertIn("Valid keys", detail)
+
+    def test_raw_fields_only_path_unchanged(self):
+        """Regression: raw start_altitude_km + start_inclination_deg still works."""
+        resp = self.client.get(
+            "/naive-route",
+            params={
+                "start_altitude_km": 750.0,
+                "start_inclination_deg": 51.6,
+                "fuel_budget_km_s": 3.5,
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        # Depot must reflect the raw values.
+        depot = body.get("depot", {})
+        self.assertAlmostEqual(depot["altitude_km"], 750.0, places=3)
+        self.assertAlmostEqual(depot["inclination_deg"], 51.6, places=3)
+
+    def test_site_path_depot_matches_plan_resolution(self):
+        """Parity: /naive-route?launch_site=X depot == /plan resolution for X.
+
+        derive_start_orbit is the shared codepath; we call it directly and
+        compare against what naive_route puts in the response depot — no LLM
+        or optimizer involved.
+        """
+        orbit = derive_start_orbit("cape_canaveral")
+        resp = self.client.get(
+            "/naive-route",
+            params={"launch_site": "cape_canaveral", "fuel_budget_km_s": 3.5},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        depot = resp.json().get("depot", {})
+        self.assertAlmostEqual(depot["altitude_km"],    orbit["altitude_km"],    places=4)
+        self.assertAlmostEqual(depot["inclination_deg"], orbit["inclination_deg"], places=4)
+        self.assertAlmostEqual(depot["raan_deg"],        orbit["raan_deg"],        places=4)
+
+
 if __name__ == "__main__":
     unittest.main()
