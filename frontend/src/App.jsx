@@ -17,6 +17,7 @@ export default function App() {
   const [routeMode, setRouteMode] = useState('ai') // 'ai' | 'naive'
   const [focusMode, setFocusMode] = useState('dim') // 'all' | 'dim' | 'focus'
   const [history, setHistory] = useState([]) // chronological plan/replan attempts, newest last
+  const [expandedIds, setExpandedIds] = useState(new Set()) // ids of currently expanded cards
 
   const [planning, setPlanning] = useState(false)
   const [replanning, setReplanning] = useState(false)
@@ -38,6 +39,7 @@ export default function App() {
     setNaivePlan(null) // invalidate cached naive route when plan inputs change
     const id = crypto.randomUUID()
     setHistory(h => [...h, { id, kind: 'plan', status: 'running', params: payload, result: null, error: null }])
+    setExpandedIds(s => new Set([...s, id]))
     try {
       const result = await api.plan(payload)
       setPlan(result)
@@ -62,6 +64,7 @@ export default function App() {
     const replanParams = { ...lastPlanRequest, user_request_text: userRequestText }
     const id = crypto.randomUUID()
     setHistory(h => [...h, { id, kind: 'replan', status: 'running', params: replanParams, result: null, error: null }])
+    setExpandedIds(s => new Set([...s, id]))
     try {
       const result = await api.replan(replanParams)
       setPlan(result.new_plan)
@@ -119,6 +122,18 @@ export default function App() {
     return pairs
   }
 
+  function toggleExpanded(id) {
+    setExpandedIds(s => {
+      const next = new Set(s)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  // Disable All/Dim/Focus when there's nothing meaningful to toggle:
+  // no active plan, or plan exists but visited nothing (empty route / 0 visits).
+  const focusButtonsDisabled = !activePlan || !(activePlan.visited_count > 0)
+
   if (debrisFieldError) {
     return (
       <div className="app-shell">
@@ -169,78 +184,113 @@ export default function App() {
 
         <aside className="working-column">
           {plan && (
-            <button className="btn btn-toggle" onClick={handleToggleNaive}>
-              {routeMode === 'ai' ? 'Show naive route' : 'Show AI route'}
-            </button>
-          )}
-          {plan && (
-            <div style={{ display: 'flex', gap: 6 }}>
-              {['all', 'dim', 'focus'].map((mode) => (
-                <button
-                  key={mode}
-                  className={`btn btn-toggle${focusMode === mode ? ' btn-primary' : ''}`}
-                  onClick={() => setFocusMode(mode)}
-                  style={{ flex: 1 }}
-                >
-                  {mode === 'all' ? 'All dots' : mode === 'dim' ? 'Dim others' : 'Focus route'}
-                </button>
-              ))}
+            <div className="working-sticky">
+              <button className="btn btn-toggle" onClick={handleToggleNaive} style={{ width: '100%' }}>
+                {routeMode === 'ai' ? 'Show naive route' : 'Show AI route'}
+              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {['all', 'dim', 'focus'].map((mode) => (
+                  <button
+                    key={mode}
+                    className={`btn btn-toggle${focusMode === mode ? ' btn-primary' : ''}`}
+                    onClick={() => setFocusMode(mode)}
+                    disabled={focusButtonsDisabled}
+                    title={focusButtonsDisabled ? 'Generate a plan with visited stops first' : undefined}
+                    style={{ flex: 1 }}
+                  >
+                    {mode === 'all' ? 'All dots' : mode === 'dim' ? 'Dim others' : 'Focus route'}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
-          {[...history].reverse().map((entry) => (
-            <div key={entry.id} className="panel reticle history-entry">
-              <div className="history-entry-header">
-                <span className="history-kind">{entry.kind === 'plan' ? 'Plan' : 'Replan'}</span>
-                <span className="history-status">
-                  {entry.status === 'running' ? 'Running…' : entry.status === 'done' ? 'Done' : 'Error'}
-                </span>
-              </div>
-              <dl className="history-params">
-                {summariseParams(entry.params).map(([label, value]) => (
-                  <Fragment key={label}>
-                    <dt>{label}</dt>
-                    <dd>{value}</dd>
-                  </Fragment>
-                ))}
-              </dl>
-              {entry.status === 'done' && entry.kind === 'plan' && (
-                <ReasoningPanel plan={entry.result} />
-              )}
-              {entry.status === 'done' && entry.kind === 'replan' && (
-                <div className="replan-result">
-                  {entry.result.explanation && (
-                    <p className="explanation">{entry.result.explanation}</p>
-                  )}
-                  {entry.result.overrides_applied && Object.keys(entry.result.overrides_applied).length > 0 && (
-                    <div className="overrides">
-                      Overrides applied:{' '}
-                      {Object.entries(entry.result.overrides_applied)
-                        .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
-                        .join(', ')}
-                    </div>
-                  )}
-                  {entry.result.diff && (
-                    <dl>
-                      {entry.result.diff.added?.length > 0 && (
-                        <><dt>Added stops</dt><dd>{entry.result.diff.added.join(', ')}</dd></>
-                      )}
-                      {entry.result.diff.dropped?.length > 0 && (
-                        <><dt>Dropped stops</dt><dd>{entry.result.diff.dropped.join(', ')}</dd></>
-                      )}
-                      <dt>Fuel Δ</dt>
-                      <dd>{entry.result.diff.fuel_delta_km_s > 0 ? '+' : ''}{entry.result.diff.fuel_delta_km_s} km/s</dd>
-                      <dt>Risk Δ</dt>
-                      <dd>{entry.result.diff.risk_delta > 0 ? '+' : ''}{entry.result.diff.risk_delta}</dd>
-                    </dl>
-                  )}
+          {[...history].reverse().map((entry) => {
+            const isExpanded = expandedIds.has(entry.id)
+            // One-line summary always shown below the header, even when collapsed.
+            let summary = null
+            if (entry.status === 'done' && entry.kind === 'plan') {
+              summary = `${entry.result.visited_count}/${entry.result.pool_size_used} visited · ${entry.result.total_fuel_cost_km_s}/${entry.result.fuel_budget_km_s} km/s`
+            } else if (entry.status === 'done' && entry.kind === 'replan') {
+              const raw = entry.result.explanation ?? ''
+              summary = raw.length > 80 ? raw.slice(0, 79) + '…' : raw
+            } else if (entry.status === 'error') {
+              const raw = entry.error ?? ''
+              summary = raw.length > 80 ? raw.slice(0, 79) + '…' : raw
+            }
+            return (
+              <div key={entry.id} className="panel reticle history-entry">
+                <div
+                  className="history-entry-header"
+                  onClick={() => toggleExpanded(entry.id)}
+                  role="button"
+                  aria-expanded={isExpanded}
+                >
+                  <span className="history-entry-label">
+                    <span className="history-chevron">{isExpanded ? '▾' : '▸'}</span>
+                    <span className="history-kind">{entry.kind === 'plan' ? 'Plan' : 'Replan'}</span>
+                  </span>
+                  <span className="history-status">
+                    {entry.status === 'running' ? 'Running…' : entry.status === 'done' ? 'Done' : 'Error'}
+                  </span>
                 </div>
-              )}
-              {entry.status === 'error' && (
-                <p className="history-error">{entry.error}</p>
-              )}
-            </div>
-          ))}
+                {summary && <p className="history-summary">{summary}</p>}
+                {isExpanded && (
+                  <>
+                    <dl className="history-params">
+                      {summariseParams(entry.params).map(([label, value]) => (
+                        <Fragment key={label}>
+                          <dt>{label}</dt>
+                          <dd>{value}</dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                    {entry.status === 'done' && entry.kind === 'plan' && (
+                      <ReasoningPanel plan={entry.result} />
+                    )}
+                    {entry.status === 'done' && entry.kind === 'replan' && (
+                      <div className="replan-result">
+                        {/* Diff-level view: what changed between old and new plan */}
+                        {entry.result.explanation && (
+                          <p className="explanation">{entry.result.explanation}</p>
+                        )}
+                        {entry.result.overrides_applied && Object.keys(entry.result.overrides_applied).length > 0 && (
+                          <div className="overrides">
+                            Overrides applied:{' '}
+                            {Object.entries(entry.result.overrides_applied)
+                              .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
+                              .join(', ')}
+                          </div>
+                        )}
+                        {entry.result.diff && (
+                          <dl>
+                            {entry.result.diff.added?.length > 0 && (
+                              <><dt>Added stops</dt><dd>{entry.result.diff.added.join(', ')}</dd></>
+                            )}
+                            {entry.result.diff.dropped?.length > 0 && (
+                              <><dt>Dropped stops</dt><dd>{entry.result.diff.dropped.join(', ')}</dd></>
+                            )}
+                            <dt>Fuel Δ</dt>
+                            <dd>{entry.result.diff.fuel_delta_km_s > 0 ? '+' : ''}{entry.result.diff.fuel_delta_km_s} km/s</dd>
+                            <dt>Risk Δ</dt>
+                            <dd>{entry.result.diff.risk_delta > 0 ? '+' : ''}{entry.result.diff.risk_delta}</dd>
+                          </dl>
+                        )}
+                        {/* Full new-plan breakdown: visited count, fuel, risk, steps, warnings.
+                            new_plan has the same shape as a /plan result, so ReasoningPanel
+                            renders it identically — including surfacing any warning when
+                            visited_count == 0 (e.g. the constraint tightened too hard). */}
+                        <ReasoningPanel plan={entry.result.new_plan} />
+                      </div>
+                    )}
+                    {entry.status === 'error' && (
+                      <p className="history-error">{entry.error}</p>
+                    )}
+                  </>
+                )}
+              </div>
+            )
+          })}
         </aside>
       </div>
     </div>

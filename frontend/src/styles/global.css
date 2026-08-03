@@ -446,6 +446,14 @@ h1, h2, h3 {
   justify-content: space-between;
   align-items: baseline;
   margin-bottom: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.history-entry-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
 }
 
 .history-kind {
@@ -490,6 +498,39 @@ h1, h2, h3 {
   font-size: 12px;
   color: var(--c-ink);
   margin: 8px 0 0;
+}
+
+.working-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* Negative margin pulls flush to the column edges; padding restores
+     the visual inset so buttons aren't cramped against the border. */
+  margin: -16px -16px 0;
+  padding: 16px 16px 12px;
+  /* Slightly more opaque than .working-column .panel cards so it reads
+     clearly "in front of" content scrolling behind it. */
+  background: rgba(20, 20, 22, 0.72);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.history-chevron {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--c-steel);
+}
+
+.history-summary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  margin: 0;
+  padding-top: 4px;
+  border-top: 1px solid var(--c-line);
 }
 
 /* ---------------------------------------------------------------------

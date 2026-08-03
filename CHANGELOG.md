@@ -761,3 +761,105 @@ Full suite: 30 → 35 in this test file, 0 failures.
 
 Bugs found & fixed: 0 shipped — this closes a known, already-disclosed follow-up
 item from the launch-site feature, not a newly discovered bug.
+## Pre-deploy testing pass — four fixes (App.jsx + main.py)
+
+Modules touched: 2 (C — `main.py`; frontend — `App.jsx`)
+
+Found via a systematic pre-deploy endpoint/UI pass: every live endpoint hit
+with real curl requests; frontend rendering verified by source inspection.
+
+### FIX #4 — Replan history entry omitted all new-plan stats (highest priority)
+
+Module: frontend (`App.jsx`)
+
+The "replan" kind history entry was rendering only diff-level data (top-level
+explanation, overrides_applied, added/dropped NORAD IDs, Fuel Δ, Risk Δ) and
+never passing `entry.result.new_plan` to `<ReasoningPanel>`. This meant:
+- `visited_count`, `pool_size_used`, `total_fuel_cost_km_s`, `fuel_used_fraction`,
+  `total_risk_collected` — not shown.
+- Step-by-step leg breakdown — not shown.
+- `new_plan.explanation` (mission briefing, distinct from the diff explanation) — not shown.
+- `new_plan.warning` (the zero-visit diagnostic) — silently dropped, invisible to
+  the user even when a constraint tightened the route to zero visits.
+
+Fix: added `<ReasoningPanel plan={entry.result.new_plan} />` inside the replan
+history entry, _below_ the existing diff block (not instead of it — both are
+kept, since the diff view and the full plan breakdown serve different purposes).
+`new_plan` has the same shape as a `/plan` result, so `ReasoningPanel` renders
+it identically, including the `warning` field path.
+
+`App.jsx` lines changed: one `<ReasoningPanel .../>` addition inside the
+`kind === 'replan'` block.  Zero changes to `ReasoningPanel.jsx`, `api.js`,
+or any backend file.
+
+Bugs found & fixed: 1 (this was the highest-priority UX issue — the demo's
+"AI co-pilot that explains itself" pitch was directly contradicted by the
+replan step being the least transparent step in the history panel).
+
+### FIX #2 — /naive-route step_breakdown missing `arrival_time_days` and `raan_drift_deg`
+
+Module: C (`main.py`)
+
+`naive_route()`'s greedy walk built each step dict with only
+`{from, to, delta_v_km_s}`.  `optimize_route()` in `optimizer.py` produces
+`{from, to, delta_v_km_s, arrival_time_days, raan_drift_deg}` (lines 247–253).
+`ReasoningPanel`'s step table has "Arrival (days)" and "RAAN drift (°)" columns
+that would display `—` on a naive-route result; naive-vs-AI step comparison was
+structurally asymmetric.
+
+Fix:
+- Added `elapsed_days` tracking to `naive_route()`'s greedy walk (same
+  `TRANSFER_TIME_DAYS_PER_KM_S` constant `optimizer.py` uses, imported from
+  `app.optimizer` — not duplicated).
+- Each step dict now includes `arrival_time_days: round(elapsed_days, 4)` (the
+  cumulative time at the _start_ of that leg, consistent with `optimizer.py`'s
+  convention of appending the step before advancing `elapsed_days`) and
+  `raan_drift_deg: 0.0` with an inline comment explaining naive_route does not
+  model RAAN drift.
+- `TRANSFER_TIME_DAYS_PER_KM_S` and `DELTA_V_SCALE` added to `main.py`'s
+  imports from `app.optimizer` and `app.cost_matrix` respectively.
+
+Bugs found & fixed: 1.
+
+### FIX #3 — /naive-route missing pool_size_used, skipped_names, min_depot_hop_km_s,
+min_risk_penalty_scale_needed, net_capacity_constrained, warning
+
+Module: C (`main.py`)
+
+`naive_route()`'s result dict was missing six fields present on `/plan`
+responses.  The most critical gap: a zero-visit result (budget too tight) had
+no `warning` field — silent failure with no diagnostic.
+
+Fix:
+- Added `skipped_names` (names of unvisited pool objects, same convention as
+  `optimizer.py`'s `skipped_names`).
+- Added `pool_size_used` (`len(pool)`).
+- Added `min_depot_hop_km_s` and `min_risk_penalty_scale_needed`: computed from
+  `matrix[0][1:]` (the already-built cost matrix's depot row) using the same
+  formulas `optimizer.py` uses at lines 301–309.  No second `build_cost_matrix()`
+  call — reuses the matrix already computed for the greedy walk.
+- Added `net_capacity_constrained: 1` (naive_route is always single-vehicle with
+  no OR-Tools net cap; echoing 1 for shape parity avoids consumer null checks).
+- Added `warning` when `visited_count == 0`, using the same message template as
+  `_run_plan()`, with the computed `min_depot_hop_km_s` and
+  `min_risk_penalty_scale_needed` values inline.
+
+Bugs found & fixed: 1.
+
+### FIX #1 — old_plan missing `explanation` key in /replan response (design doc)
+
+Module: C (`main.py`)
+
+`old_plan` in a `/replan` real-override response has no `explanation` key.
+Design decision confirmed intentional: narrating `old_plan` would cost an
+extra LLM call for a plan the user just asked to replace, with no downstream
+consumer (frontend renders `new_plan`'s stats, not `old_plan`'s).
+
+Fix: added an inline comment at `main.py` line ~764 (the `_run_plan(req)` call
+for `old_plan`) explicitly documenting that the asymmetry is by design, not a
+gap.  No code behavior changed.  The schema asymmetry (`old_plan.explanation`
+absent; `new_plan.explanation` present) is now disclosed in the source.
+
+Bugs found & fixed: 0 new bugs — this was an undocumented intentional choice,
+now documented.
+

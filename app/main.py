@@ -33,8 +33,8 @@ load_dotenv()
 from app.tle_fetch import get_debris_field, get_cache_timestamp, CACHE_MAX_AGE_SECONDS
 from app.launch_sites import LAUNCH_SITES, derive_start_orbit
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
-from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE
-from app.optimizer import optimize_route, RISK_PENALTY_SCALE
+from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE, DELTA_V_SCALE
+from app.optimizer import optimize_route, RISK_PENALTY_SCALE, TRANSFER_TIME_DAYS_PER_KM_S
 from app.removal_method import add_removal_methods, METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE, METHOD_MONITOR_ONLY
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -762,6 +762,12 @@ def replan(req: ReplanRequest):
     # ------------------------------------------------------------------ #
     logger.debug("[replan] req.model_dump() before old_plan: %s", req.model_dump())
     old_plan = _run_plan(req)
+    # old_plan intentionally has no "explanation" key.
+    # Design rationale: old_plan is being discarded; narrating it would cost an
+    # extra LLM call for a plan the user just asked to replace, with no downstream
+    # consumer (the frontend renders new_plan's stats/briefing, not old_plan's).
+    # The schema asymmetry is intentional -- old_plan.explanation is absent,
+    # not None, by design.  See CHANGELOG "FIX #1 — old_plan explanation".
 
     new_req_data = req.model_dump()
     new_req_data.update(overrides)
@@ -910,6 +916,7 @@ def naive_route(
     remaining = set(range(1, len(nodes)))
     current = 0
     fuel_used = 0.0
+    elapsed_days = 0.0  # cumulative mission time, same convention as optimizer.py
     steps: list[dict[str, Any]] = []
 
     while remaining:
@@ -918,7 +925,18 @@ def naive_route(
         if fuel_used + hop_cost > fuel_budget_km_s:
             break
         fuel_used += hop_cost
-        steps.append({"from": nodes[current]["name"], "to": nodes[next_idx]["name"], "delta_v_km_s": round(hop_cost, 4)})
+        steps.append({
+            "from": nodes[current]["name"],
+            "to": nodes[next_idx]["name"],
+            "delta_v_km_s": round(hop_cost, 4),
+            "arrival_time_days": round(elapsed_days, 4),
+            # naive_route does not model RAAN drift -- the greedy walk uses static
+            # fetch-time costs throughout, unlike optimizer.py's post-solve drift walk.
+            "raan_drift_deg": 0.0,
+        })
+        # Advance elapsed time using the same heuristic constant optimizer.py uses,
+        # so arrival_time_days is on the same scale across both routes.
+        elapsed_days += hop_cost * TRANSFER_TIME_DAYS_PER_KM_S
         visited_idx.append(next_idx)
         remaining.discard(next_idx)
         current = next_idx
@@ -942,17 +960,57 @@ def naive_route(
         for o in visited_objects
     ]
 
+    # Fields for the zero-visit warning (mirrors _run_plan / optimizer.py logic).
+    # Computed here using the same matrix already built above so there's no
+    # second build_cost_matrix() call.  depot_row = row 0, pool cols 1..n.
+    depot_row = matrix[0][1:]  # list of raw km/s floats, one per pool node
+    min_depot_hop_km_s: float = round(min(depot_row), 4) if depot_row else 0.0
+    min_risk_penalty_scale_needed: float = (
+        round(
+            min(
+                depot_row[j] * DELTA_V_SCALE / pool[j].get("risk_score", 1e-9)
+                for j in range(len(pool))
+                if pool[j].get("risk_score", 0) > 0
+            ),
+            1,
+        )
+        if any(pool[j].get("risk_score", 0) > 0 for j in range(len(pool)))
+        else 0.0
+    )
+
+    skipped_objects = [nodes[i] for i in range(1, len(nodes)) if i not in set(visited_idx)]
+
     result = {
         "route": [o["name"] for o in visited_objects],
         "route_details": route_details,
         "visited_count": len(visited_objects),
         "skipped_count": len(pool) - len(visited_objects),
+        "skipped_names": [o["name"] for o in skipped_objects],
+        "pool_size_used": len(pool),
         "total_fuel_cost_km_s": round(fuel_used, 4),
         "fuel_budget_km_s": fuel_budget_km_s,
         "fuel_used_fraction": round(fuel_used / fuel_budget_km_s, 4) if fuel_budget_km_s > 0 else 0.0,
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
         "step_breakdown": steps,
+        # Shape parity with /plan: include diagnostic fields so consumers
+        # (and naive-vs-AI comparisons) can interpret zero-visit results.
+        "min_depot_hop_km_s": min_depot_hop_km_s,
+        "min_risk_penalty_scale_needed": min_risk_penalty_scale_needed,
+        # naive_route is always single-vehicle, no OR-Tools net cap --
+        # echo 1 for shape parity rather than None (avoids consumer null checks).
+        "net_capacity_constrained": 1,
     }
+
+    if result["visited_count"] == 0:
+        result["warning"] = (
+            f"No debris nodes were visited within the given constraints. "
+            f"Possible causes: fuel_budget_km_s is too tight to reach any "
+            f"candidate (cheapest depot hop on this pool is ~{min_depot_hop_km_s} km/s), or "
+            f"risk_penalty_scale is too low relative to arc costs (needs ~{min_risk_penalty_scale_needed} "
+            f"or higher for the cheapest reachable node on this pool), making it "
+            f"cheaper for the solver to skip every node. Try raising "
+            f"fuel_budget_km_s or risk_penalty_scale."
+        )
 
     explanation = _explain_plan(result)
     result["explanation"] = explanation

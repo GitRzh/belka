@@ -745,3 +745,142 @@ def test_naive_route_respects_max_tle_age_days(monkeypatch):
         f"Stale object did not take pool slot when max_tle_age_days=25.0 "
         f"(got {first_raised_name!r}); filter is too aggressive or risk ranking broken"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Pre-deploy fixes — /naive-route shape parity (FIX #2 and FIX #3)
+# --------------------------------------------------------------------------- #
+
+# Expected step keys in both /plan (via optimize_route) and /naive-route after fix.
+_EXPECTED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg"}
+
+
+def test_naive_route_step_breakdown_has_all_five_keys(monkeypatch):
+    """After FIX #2: every step in naive_route()'s step_breakdown must carry the
+    same five keys that optimizer.py produces.  This is a regression guard so
+    the asymmetry can't silently recur."""
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
+    assert result["visited_count"] > 0, (
+        "Need at least one visited node; raise fuel_budget_km_s if live data changed"
+    )
+    for i, step in enumerate(result["step_breakdown"]):
+        assert set(step.keys()) == _EXPECTED_STEP_KEYS, (
+            f"step_breakdown[{i}] has keys {set(step.keys())!r}, "
+            f"expected {_EXPECTED_STEP_KEYS!r}"
+        )
+
+
+def test_naive_route_step_arrival_time_days_increases(monkeypatch):
+    """arrival_time_days must be monotonically non-decreasing across steps
+    (elapsed time never goes backward) and must be 0.0 on the first leg."""
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
+    steps = result["step_breakdown"]
+    if not steps:
+        return  # nothing to check
+    assert steps[0]["arrival_time_days"] == 0.0, (
+        f"First step arrival_time_days should be 0.0, got {steps[0]['arrival_time_days']}"
+    )
+    for i in range(1, len(steps)):
+        assert steps[i]["arrival_time_days"] >= steps[i - 1]["arrival_time_days"], (
+            f"arrival_time_days decreased from step {i-1} to step {i}: "
+            f"{steps[i-1]['arrival_time_days']} -> {steps[i]['arrival_time_days']}"
+        )
+
+
+def test_naive_route_step_raan_drift_deg_is_zero(monkeypatch):
+    """raan_drift_deg must be 0.0 on every step: naive_route doesn't model drift."""
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
+    for i, step in enumerate(result["step_breakdown"]):
+        assert step["raan_drift_deg"] == 0.0, (
+            f"step_breakdown[{i}]['raan_drift_deg'] = {step['raan_drift_deg']!r}, expected 0.0"
+        )
+
+
+def test_naive_route_has_pool_size_used(monkeypatch):
+    """After FIX #3: pool_size_used must be present and equal to len(pool)."""
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
+    assert "pool_size_used" in result, "pool_size_used missing from naive_route result"
+    assert isinstance(result["pool_size_used"], int)
+    assert result["pool_size_used"] > 0
+
+
+def test_naive_route_has_skipped_names(monkeypatch):
+    """After FIX #3: skipped_names must be present (may be empty list when all visited)."""
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
+    assert "skipped_names" in result, "skipped_names missing from naive_route result"
+    assert isinstance(result["skipped_names"], list)
+    assert len(result["skipped_names"]) == result["skipped_count"]
+
+
+def test_naive_route_has_min_depot_hop_km_s(monkeypatch):
+    """After FIX #3: min_depot_hop_km_s must be present and be a realistic km/s value."""
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
+    assert "min_depot_hop_km_s" in result, "min_depot_hop_km_s missing from naive_route result"
+    val = result["min_depot_hop_km_s"]
+    assert isinstance(val, float)
+    # Sanity range: any plausible LEO hop is between 0.01 km/s and 20 km/s.
+    assert 0.01 <= val <= 20.0, (
+        f"min_depot_hop_km_s={val} is outside the plausible km/s range for a LEO hop"
+    )
+
+
+def test_naive_route_zero_visit_produces_warning(monkeypatch):
+    """After FIX #3: a tiny fuel budget that forces zero visits must produce
+    a non-null warning with min_depot_hop_km_s embedded in the message.
+    This is the exact gap that was silent before the fix."""
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=0.001)
+    if result["visited_count"] > 0:
+        # Budget was large enough on the live pool; skip rather than fail --
+        # the real-data cheapest hop can shift between Celestrak refreshes.
+        return
+    assert "warning" in result, (
+        "zero visited_count on naive_route produced no warning field (silent failure)"
+    )
+    assert result["warning"], "warning field is present but empty"
+    assert "min_depot_hop_km_s" in result, (
+        "min_depot_hop_km_s missing when visited_count==0"
+    )
+    assert "min_risk_penalty_scale_needed" in result, (
+        "min_risk_penalty_scale_needed missing when visited_count==0"
+    )
+    # Confirm the hop value in the warning message matches the field value.
+    hop = result["min_depot_hop_km_s"]
+    assert str(hop) in result["warning"], (
+        f"min_depot_hop_km_s value {hop} not embedded in warning message"
+    )
+
+
+def test_naive_route_min_depot_hop_matches_cost_matrix(monkeypatch):
+    """min_depot_hop_km_s must match the independently computed cheapest
+    depot->node cost from build_cost_matrix() — same verification as the
+    original test pass that caught this gap."""
+    from app.cost_matrix import build_cost_matrix, select_candidate_pool
+    from app.main import _get_scored_field
+
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+
+    # Build the same pool naive_route uses internally.
+    scored = _get_scored_field()
+    scored_filtered = [o for o in scored if o.get("epoch_age_days", 0.0) <= 14.0]
+    pool = select_candidate_pool(scored_filtered, pool_size=40)
+
+    depot = {
+        "norad_id": -1, "name": "DEPOT", "altitude_km": 800.0,
+        "inclination_deg": 74.0, "raan_deg": 0.0, "risk_score": 0.0,
+    }
+    nodes = [depot] + pool
+    matrix = build_cost_matrix(nodes)
+    expected_min_hop = round(min(matrix[0][1:]), 4)
+
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=0.001)
+    assert result["min_depot_hop_km_s"] == expected_min_hop, (
+        f"min_depot_hop_km_s mismatch: response={result['min_depot_hop_km_s']}, "
+        f"independently computed={expected_min_hop}"
+    )
