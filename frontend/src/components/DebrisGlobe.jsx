@@ -58,12 +58,13 @@ function slerpArc(a, b, steps = ARC_STEPS) {
 // from PLAN.txt is visible at a glance, not just implied by list order.
 
 function riskColor(riskScore) {
-  // Grayscale value-only encoding (matches the rest of the UI): higher
-  // risk = brighter. Range kept off pure black/white so both ends stay
-  // visible against the (also grayscale-filtered) Earth basemap.
+  // Green (hue 120°) → yellow (60°) → red (0°) as risk rises.
+  // Two linear segments: low half shifts green→yellow, high half yellow→red.
   const r = Math.min(1, Math.max(0, riskScore))
-  const lightness = 0.35 + r * 0.55
-  return Color.fromHsl(0, 0, lightness, 0.9)
+  const hue = r <= 0.5
+    ? (120 - r * 2 * 60) / 360        // 120°→60° over [0, 0.5]
+    : (60  - (r - 0.5) * 2 * 60) / 360  // 60°→0° over [0.5, 1]
+  return Color.fromHsl(hue, 1, 0.5, 0.9)
 }
 
 function riskSize(riskScore) {
@@ -108,7 +109,7 @@ function useCacheAge(dataFetchedAt) {
   return ageMin
 }
 
-export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 'solid', cacheMetadata }) {
+export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 'solid', cacheMetadata, focusMode = 'dim' }) {
   const ageMin = useCacheAge(cacheMetadata?.data_fetched_at)
 
   // Resolve each route label to a Cesium position.  Depot is prepended so the
@@ -176,22 +177,31 @@ export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 's
         </Entity>
       )}
 
-      {debrisField.map((debris) => (
-        <Entity key={debris.norad_id} position={debrisPosition(debris)} name={debris.name}>
-          <PointGraphics
-            pixelSize={
-              visitedIds && visitedIds.has(debris.norad_id)
-                ? riskSize(debris.risk_score) + 2
-                : riskSize(debris.risk_score)
-            }
-            color={
-              visitedIds && !visitedIds.has(debris.norad_id)
-                ? riskColor(debris.risk_score).withAlpha(0.3)
-                : riskColor(debris.risk_score)
-            }
-          />
-        </Entity>
-      ))}
+      {debrisField
+        .filter((debris) =>
+          // 'focus': skip non-visited entities entirely (reduces Cesium entity count).
+          // Pass through everything when focusMode !== 'focus', or when there's no
+          // active route (visitedIds === null), or when this dot is on the route.
+          focusMode !== 'focus' || !visitedIds || visitedIds.has(debris.norad_id)
+        )
+        .map((debris) => {
+          const isVisited    = visitedIds && visitedIds.has(debris.norad_id)
+          const isNonVisited = visitedIds && !visitedIds.has(debris.norad_id)
+          // isVisited:    explicitly on the route    -> +2 px, full color
+          // isNonVisited: route exists, not on it   -> normal px, dimmed (unless 'all')
+          // neither:      no route active            -> normal px, full color
+          const color = (focusMode === 'all' || !isNonVisited)
+            ? riskColor(debris.risk_score)
+            : riskColor(debris.risk_score).withAlpha(0.3)
+          return (
+            <Entity key={debris.norad_id} position={debrisPosition(debris)} name={debris.name}>
+              <PointGraphics
+                pixelSize={isVisited ? riskSize(debris.risk_score) + 2 : riskSize(debris.risk_score)}
+                color={color}
+              />
+            </Entity>
+          )
+        })}
 
       {routePositions && (
         <Entity>

@@ -26,11 +26,11 @@ from typing import Any
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 try:
-    from .cost_matrix import build_cost_matrix, scale_matrix_for_ortools
+    from .cost_matrix import build_cost_matrix, scale_matrix_for_ortools, DELTA_V_SCALE
     from .removal_method import METHOD_NET_CAPTURE
     from .delta_v import raan_drift_deg, transfer_delta_v
 except ImportError:
-    from cost_matrix import build_cost_matrix, scale_matrix_for_ortools  # pyright: ignore[reportImplicitRelativeImport]
+    from cost_matrix import build_cost_matrix, scale_matrix_for_ortools, DELTA_V_SCALE  # pyright: ignore[reportImplicitRelativeImport]
     from removal_method import METHOD_NET_CAPTURE  # pyright: ignore[reportImplicitRelativeImport]
     from delta_v import raan_drift_deg, transfer_delta_v  # pyright: ignore[reportImplicitRelativeImport]
 
@@ -298,6 +298,15 @@ def optimize_route(
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
         "step_breakdown": step_breakdown,
         "net_capacity_constrained": nets_carried,
+        "min_depot_hop_km_s": round(min(matrix[0][1:]), 4) if len(pool) > 0 else 0.0,
+        "min_risk_penalty_scale_needed": round(
+            min(
+                matrix[0][j + 1] * DELTA_V_SCALE / obj.get("risk_score", 1e-9)
+                for j, obj in enumerate(pool)
+                if obj.get("risk_score", 0) > 0
+            ),
+            1,
+        ) if any(obj.get("risk_score", 0) > 0 for obj in pool) else 0.0,
     }
 
 

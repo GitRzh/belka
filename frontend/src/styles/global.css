@@ -1,7 +1,8 @@
 /* =====================================================================
    Orbital-Clean — mission-console design tokens
-   Grayscale only, on purpose: risk/status is encoded by VALUE (lightness),
-   never by hue. See README (design notes) for rationale.
+   Grayscale throughout, with one deliberate exception: the Cesium 3D globe
+   renders in natural color. Risk on the globe is encoded by hue (green→red)
+   and by dot size. All other UI chrome remains grayscale/value-only.
    ===================================================================== */
 
 :root {
@@ -160,19 +161,19 @@ h1, h2, h3 {
 .globe-pane {
   flex: 1;
   min-width: 0;
+  border-left: 1px solid var(--c-line);
   border-right: 1px solid var(--c-line);
 }
 
-/* Applied to the Cesium viewport wrapper: renders Earth imagery +
-   entities in the same grayscale value-system as the rest of the UI. */
+/* Cesium viewport wrapper — full natural color, intentionally exempt from
+   the grayscale rule that governs the rest of the UI chrome. */
 .globe-viewport {
   position: relative;
   width: 100%;
   height: 100%;
-  filter: grayscale(1) contrast(1.08) brightness(0.95);
 }
 
-.control-column {
+.mission-column {
   width: 400px;
   flex-shrink: 0;
   overflow-y: auto;
@@ -180,6 +181,22 @@ h1, h2, h3 {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.working-column {
+  width: 400px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.working-column .panel {
+  background: rgba(20, 20, 22, 0.35);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
 
 .panel {
@@ -422,6 +439,60 @@ h1, h2, h3 {
 }
 
 /* ---------------------------------------------------------------------
+   History feed (working-column)
+   --------------------------------------------------------------------- */
+.history-entry-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.history-kind {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--c-steel);
+}
+
+.history-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-ink);
+}
+
+.history-params {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  margin: 0 0 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.history-params dt {
+  color: var(--c-steel);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.history-params dd {
+  margin: 0;
+  color: var(--c-ink);
+  text-align: right;
+}
+
+.history-error {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--c-ink);
+  margin: 8px 0 0;
+}
+
+/* ---------------------------------------------------------------------
    Cache-age chip on the globe
    --------------------------------------------------------------------- */
 .cache-chip {
@@ -439,9 +510,6 @@ h1, h2, h3 {
   font-size: 11px;
   padding: 4px 10px;
   border-radius: var(--radius);
-  /* filter is applied to a grayscale-filtered ancestor; counteract it
-     so the chip itself stays crisp and legible rather than washed out */
-  filter: grayscale(0) contrast(1) brightness(1);
 }
 
 .cache-chip--stale .stale-tag {
@@ -475,10 +543,12 @@ h1, h2, h3 {
   }
   .globe-pane {
     height: 45vh;
+    border-left: none;
     border-right: none;
     border-bottom: 1px solid var(--c-line);
   }
-  .control-column {
+  .mission-column,
+  .working-column {
     width: 100%;
   }
 }

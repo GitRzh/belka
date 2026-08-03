@@ -295,14 +295,16 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
     # guard above doesn't fire.  Flag it explicitly so callers always get a
     # human-readable explanation rather than a silent empty route.
     if result["visited_count"] == 0:
+        min_hop = result["min_depot_hop_km_s"]
+        min_rps = result["min_risk_penalty_scale_needed"]
         result["warning"] = (
-            "No debris nodes were visited within the given constraints. "
-            "Possible causes: fuel_budget_km_s is too tight to reach any "
-            "candidate (cheapest hop on this pool is ~0.004 km/s), or "
-            "risk_penalty_scale is too low relative to arc costs (threshold "
-            "~2-3 on the 700-1000km pool), making it cheaper for the solver "
-            "to skip every node. Try raising fuel_budget_km_s or "
-            "risk_penalty_scale."
+            f"No debris nodes were visited within the given constraints. "
+            f"Possible causes: fuel_budget_km_s is too tight to reach any "
+            f"candidate (cheapest depot hop on this pool is ~{min_hop} km/s), or "
+            f"risk_penalty_scale is too low relative to arc costs (needs ~{min_rps} "
+            f"or higher for the cheapest reachable node on this pool), making it "
+            f"cheaper for the solver to skip every node. Try raising "
+            f"fuel_budget_km_s or risk_penalty_scale."
         )
 
     result["pool_size_used"] = len(pool)

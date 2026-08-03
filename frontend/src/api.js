@@ -20,7 +20,11 @@ async function request(path, options = {}) {
   }
 
   if (!res.ok) {
-    const err = new Error(body?.detail || `Request failed: ${res.status}`)
+    const rawDetail = body?.detail
+    const detail = Array.isArray(rawDetail)
+      ? rawDetail.map((e) => e.msg ?? String(e)).join(' · ')
+      : rawDetail
+    const err = new Error(detail || `Request failed: ${res.status}`)
     err.status = res.status
     err.body = body
     throw err
@@ -38,14 +42,16 @@ export const api = {
 
   getNaiveRoute: (params) => {
     const qs = new URLSearchParams({
-      start_altitude_km: params.start_altitude_km,
-      start_inclination_deg: params.start_inclination_deg,
       fuel_budget_km_s: params.fuel_budget_km_s,
-      // start_raan_deg is optional in PlanForm (left blank → omitted from
-      // lastPlanRequest payload). Only send it when present so the backend
-      // falls back to its own default (0.0) rather than receiving "undefined".
-      ...(params.start_raan_deg != null ? { start_raan_deg: params.start_raan_deg } : {}),
-      ...(params.pool_size != null ? { pool_size: params.pool_size } : {}),
+      // Raw-orbit fields: only include when present. In launch-site mode both
+      // are undefined on lastPlanRequest; sending "undefined" causes a 422.
+      ...(params.start_altitude_km     != null ? { start_altitude_km:     params.start_altitude_km }     : {}),
+      ...(params.start_inclination_deg != null ? { start_inclination_deg: params.start_inclination_deg } : {}),
+      // Launch-site fields: include only when the original plan used a site.
+      ...(params.launch_site     != null ? { launch_site:     params.launch_site }     : {}),
+      ...(params.inclination_deg != null ? { inclination_deg: params.inclination_deg } : {}),
+      ...(params.start_raan_deg  != null ? { start_raan_deg:  params.start_raan_deg }  : {}),
+      ...(params.pool_size       != null ? { pool_size:       params.pool_size }       : {}),
     }).toString()
     return request(`/naive-route?${qs}`)
   },
