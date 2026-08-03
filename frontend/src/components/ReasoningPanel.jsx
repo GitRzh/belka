@@ -2,7 +2,7 @@
 // - explanation_error -> plan still valid, show "explanation unavailable" inline
 // - warning -> surface it, don't drop it
 
-export default function ReasoningPanel({ plan }) {
+export default function ReasoningPanel({ plan, explanationOverride }) {
   if (!plan) return null
 
   return (
@@ -11,7 +11,9 @@ export default function ReasoningPanel({ plan }) {
 
       {plan.warning && <p className="warning" role="alert">Warning: {plan.warning}</p>}
 
-      {plan.explanation ? (
+      {explanationOverride != null ? (
+        <p className="explanation">{explanationOverride}</p>
+      ) : plan.explanation ? (
         <p className="explanation">{plan.explanation}</p>
       ) : (
         <p className="explanation">

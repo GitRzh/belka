@@ -980,12 +980,21 @@ def naive_route(
 
     skipped_objects = [nodes[i] for i in range(1, len(nodes)) if i not in set(visited_idx)]
 
+    # Mirror optimizer.py's _label() so route and skipped_names carry
+    # "Name (norad_id)" labels.  DebrisGlobe.jsx's noradIdFromRouteLabel()
+    # regex requires the trailing "(digits)" to resolve positions; plain
+    # names produce null IDs and the polyline never draws.
+    def _label(obj: dict) -> str:
+        if obj["norad_id"] == -1:
+            return obj["name"]
+        return f"{obj['name']} ({obj['norad_id']})"
+
     result = {
-        "route": [o["name"] for o in visited_objects],
+        "route": [_label(o) for o in visited_objects],
         "route_details": route_details,
         "visited_count": len(visited_objects),
         "skipped_count": len(pool) - len(visited_objects),
-        "skipped_names": [o["name"] for o in skipped_objects],
+        "skipped_names": [_label(o) for o in skipped_objects],
         "pool_size_used": len(pool),
         "total_fuel_cost_km_s": round(fuel_used, 4),
         "fuel_budget_km_s": fuel_budget_km_s,

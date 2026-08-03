@@ -205,6 +205,25 @@ export default function App() {
             </div>
           )}
 
+          {/* Active-plan stats panel: always reflects the currently displayed
+              route (AI or naive). Separate from history cards so toggling the
+              route mode visibly updates the numbers without re-expanding anything. */}
+          {activePlan && (
+            <div className="panel reticle">
+              <h2 className="panel-title" style={{ marginBottom: 4 }}>
+                {routeMode === 'naive' ? 'Naive route (active)' : 'AI route (active)'}
+              </h2>
+              <ReasoningPanel
+                plan={activePlan}
+                explanationOverride={
+                  routeMode === 'naive'
+                    ? 'Nearest-neighbor baseline (no AI optimization)'
+                    : undefined
+                }
+              />
+            </div>
+          )}
+
           {[...history].reverse().map((entry) => {
             const isExpanded = expandedIds.has(entry.id)
             // One-line summary always shown below the header, even when collapsed.

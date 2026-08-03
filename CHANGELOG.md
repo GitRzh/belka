@@ -863,3 +863,52 @@ absent; `new_plan.explanation` present) is now disclosed in the source.
 Bugs found & fixed: 0 new bugs — this was an undocumented intentional choice,
 now documented.
 
+
+## Pre-deploy testing pass — summary changelog (conventional format)
+
+### Fixed
+- Replan history entries in the UI previously showed only a diff summary
+  (added/dropped targets, fuel/risk deltas) and silently dropped the full
+  plan breakdown — visited count, fuel used, risk collected, step-by-step
+  legs, and any zero-visit warning were present in the API response but
+  never rendered. Root cause: no component was bound to the live active
+  plan state; all ReasoningPanel instances were reading frozen history
+  snapshots. Added a dedicated active-plan panel bound to activePlan
+  that re-renders on every state change, alongside the existing diff view.
+  (frontend/src/App.jsx)
+
+- /naive-route was missing 6 fields present on /plan: pool_size_used,
+  skipped_names, min_depot_hop_km_s, min_risk_penalty_scale_needed,
+  net_capacity_constrained, and — most importantly — warning. A
+  naive route could previously return 0 visited objects with no signal to
+  the caller. All 6 fields now present, shape parity with /plan
+  confirmed via live curl. (app/main.py)
+
+- /naive-route step_breakdown entries were missing arrival_time_days
+  and raan_drift_deg, present on /plan's step entries. Added for
+  shape consistency, raan_drift_deg fixed at 0.0 with a comment noting
+  naive route doesn't model RAAN drift. (app/main.py)
+
+- Naive/AI route toggle: switching to the naive route never drew a
+  polyline on the globe, even when visited_count > 0. Root cause:
+  naive_route() built route/skipped labels as bare object names
+  ("COSMOS 2251 DEB"), while the frontend's NORAD-ID extraction regex
+  expects the AI optimizer's "Name (id)" format
+  ("COSMOS 2251 DEB (22675)"). Every label failed to resolve to a
+  debris object, silently collapsing the route to a single point.
+  Added a shared _label() helper so naive and AI routes use identical
+  label formatting. New regression test
+  (test_naive_route_labels_include_norad_id) locks the format going
+  forward. (app/main.py)
+
+### Documented
+- old_plan.explanation is intentionally absent from /replan
+  responses — the real-override branch never narrates a plan that's
+  about to be discarded. This was previously an undocumented gap;
+  now documented inline and in this changelog as a design decision,
+  not a bug.
+
+### Testing
+- Test count: 77 -> 86 (9 new regression tests added covering naive-route
+  shape parity, step field presence, zero-visit warning behavior, and
+  route label format). All passing.

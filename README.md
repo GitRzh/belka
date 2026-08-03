@@ -12,6 +12,30 @@ Every recommendation this system makes traces to a rule, not a black-box guess:
 
 - **Launch-site start orbit** (`launch_site` on `/plan`/`/replan`/`/naive-route`, `launch_sites.py`) is derived by a deterministic function — no LLM decides the resulting orbit. Inclination is floored at the site's launch latitude (the physically correct minimum achievable for a due-east launch, not an arbitrary number); RAAN is approximated as the site's longitude at launch. The only LLM involvement anywhere in this feature is `/replan`'s existing free-text parser recognizing a site-change request (e.g. "launch from Kourou instead") and mapping it to one of five known site keys, the same explain-don't-decide pattern already used for weight overrides. Text that doesn't clearly match one of the five known sites is dropped rather than guessed at, leaving the current start orbit unchanged — not a partial guess, not a 422.
 
+## Naive-vs-AI Comparison
+
+Toggling "Show Naive Route" replaces the AI-optimized plan with a
+nearest-neighbor greedy baseline — no risk weighting, just cheapest next
+hop at each step. This exists to demonstrate that smart targeting beats
+raw removal volume: in testing, a 4.0 km/s budget example showed the AI
+route visiting 1 high-value target using 49% of budget for a risk score
+of 0.75, versus the naive route visiting 2 lower-value targets using 96%
+of budget for a risk score of 1.51 — more fuel spent, less actual risk
+reduction achieved.
+
+The naive route returns the same response shape as the AI-optimized
+route (pool size, skipped objects, warnings, step-by-step breakdown) for
+full UI parity, but does not receive an LLM-generated explanation — the
+panel shows "Nearest-neighbor baseline (no AI optimization)" instead.
+
+## Replan History
+
+Replan history entries show the same full mission breakdown as the
+original plan (visited count, fuel/risk stats, step-by-step legs) in
+addition to the diff summary (what was added/dropped and why) — so you
+can inspect either the delta or the complete resulting plan from any
+point in the replan history.
+
 ## Real-World Grounding
 
 This is a planning/decision-support tool, not a physical debris-removal simulation. It's built against real constraints and real missions currently flying.

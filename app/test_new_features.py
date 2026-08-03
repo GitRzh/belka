@@ -884,3 +884,25 @@ def test_naive_route_min_depot_hop_matches_cost_matrix(monkeypatch):
         f"min_depot_hop_km_s mismatch: response={result['min_depot_hop_km_s']}, "
         f"independently computed={expected_min_hop}"
     )
+
+
+def test_naive_route_labels_include_norad_id(monkeypatch):
+    """route and skipped_names must use 'Name (norad_id)' labels, matching
+    optimizer.py's _label() format.  DebrisGlobe.jsx's noradIdFromRouteLabel()
+    regex requires the trailing (digits) to resolve globe positions; plain
+    names produce null IDs and the polyline silently never draws."""
+    monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
+
+    import re
+    label_re = re.compile(r".+ \(\d+\)$")
+
+    for label in result["route"]:
+        assert label_re.match(label), (
+            f"route label {label!r} missing '(norad_id)' suffix — "
+            "DebrisGlobe polyline will not draw for this entry"
+        )
+    for label in result["skipped_names"]:
+        assert label_re.match(label), (
+            f"skipped_names label {label!r} missing '(norad_id)' suffix"
+        )
