@@ -4,12 +4,16 @@ import PlanForm from './components/PlanForm.jsx'
 import ReasoningPanel from './components/ReasoningPanel.jsx'
 import ReplanInput from './components/ReplanInput.jsx'
 import MissionClock from './components/MissionClock.jsx'
+import DebrisInfoModal from './components/DebrisInfoModal.jsx'
 import { api } from './api.js'
 
 export default function App() {
   const [debrisField, setDebrisField] = useState([])
   const [debrisFieldError, setDebrisFieldError] = useState(null)
   const [cacheMetadata, setCacheMetadata] = useState(null) // { data_fetched_at, data_stale }
+
+  const [selectedDebris, setSelectedDebris] = useState(null) // debris object clicked on the globe
+  const [isDebrisModalPinned, setIsDebrisModalPinned] = useState(false)
 
   const [lastPlanRequest, setLastPlanRequest] = useState(null) // needed for /replan body
   const [plan, setPlan] = useState(null) // current active plan shown on the globe
@@ -97,6 +101,19 @@ export default function App() {
 
   const activePlan = routeMode === 'ai' ? plan : naivePlan
 
+  function handleDebrisSelect(debris) {
+    setSelectedDebris(debris)
+  }
+
+  function handleDebrisModalClose() {
+    setSelectedDebris(null)
+    setIsDebrisModalPinned(false)
+  }
+
+  function handleDebrisModalTogglePin() {
+    setIsDebrisModalPinned((prev) => !prev)
+  }
+
   // Produces a compact [label, value] list for a plan/replan params object.
   // Skips defaults that add noise; always shows orbit origin and fuel budget.
   const DEFAULT_RISK_PENALTY_SCALE = 3000 // mirrors optimizer.py RISK_PENALTY_SCALE
@@ -171,7 +188,7 @@ export default function App() {
           </section>
         </aside>
 
-        <div className="globe-pane reticle">
+        <div className="globe-pane reticle" style={{ position: 'relative' }}>
           <DebrisGlobe
             debrisField={debrisField}
             route={activePlan?.route}
@@ -179,6 +196,18 @@ export default function App() {
             routeStyle={routeMode === 'ai' ? 'solid' : 'dashed'}
             cacheMetadata={cacheMetadata}
             focusMode={focusMode}
+            selectedDebrisId={selectedDebris?.norad_id ?? null}
+            isModalPinned={isDebrisModalPinned}
+            onDebrisSelect={handleDebrisSelect}
+            onBackgroundClick={() => {
+              if (!isDebrisModalPinned) handleDebrisModalClose()
+            }}
+          />
+          <DebrisInfoModal
+            selectedDebris={selectedDebris}
+            isModalPinned={isDebrisModalPinned}
+            onClose={handleDebrisModalClose}
+            onTogglePin={handleDebrisModalTogglePin}
           />
         </div>
 

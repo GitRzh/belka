@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Viewer, Entity, PolylineGraphics, PointGraphics } from 'resium'
-import { Cartesian3, Color, PolylineDashMaterialProperty } from 'cesium'
+import { Cartesian3, Color, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
 
 // Spherical linear interpolation between two Cartesian3 positions.
 // Returns `steps` points from `a` up to (but not including) `b`.
@@ -109,8 +109,53 @@ function useCacheAge(dataFetchedAt) {
   return ageMin
 }
 
-export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 'solid', cacheMetadata, focusMode = 'dim' }) {
+export default function DebrisGlobe({
+  debrisField,
+  route,
+  depot,
+  routeStyle = 'solid',
+  cacheMetadata,
+  focusMode = 'dim',
+  selectedDebrisId = null,
+  isModalPinned = false,
+  onDebrisSelect,
+  onBackgroundClick,
+}) {
+  const viewerRef = useRef(null)
   const ageMin = useCacheAge(cacheMetadata?.data_fetched_at)
+
+  // Wire Cesium's ScreenSpaceEventHandler for left-click on the globe.
+  // We use the native Cesium API rather than resium's onClick to reliably
+  // distinguish "clicked an entity" from "clicked empty space".
+  useEffect(() => {
+    const viewer = viewerRef.current?.cesiumElement
+    if (!viewer) return
+
+    const handler = viewer.screenSpaceEventHandler
+    function handleClick(movement) {
+      const picked = viewer.scene.pick(movement.position)
+      if (picked?.id) {
+        // Cesium Entity was clicked — find matching debris object by norad_id.
+        // Entity `name` is set to debris.name; the entity `id` is the React
+        // <Entity key={norad_id}> which Cesium stores as the entity id string.
+        const clickedId = Number(picked.id.id ?? picked.id)
+        const debris = debrisField.find((d) => d.norad_id === clickedId)
+        if (debris && onDebrisSelect) {
+          onDebrisSelect(debris)
+        }
+      } else {
+        // Clicked empty globe background
+        if (onBackgroundClick) onBackgroundClick()
+      }
+    }
+
+    handler.setInputAction(handleClick, ScreenSpaceEventType.LEFT_CLICK)
+    return () => {
+      // Clean up: reset to Cesium's default no-op rather than removing the
+      // whole handler (other Cesium internals may still need it intact).
+      handler.removeInputAction(ScreenSpaceEventType.LEFT_CLICK)
+    }
+  }, [debrisField, onDebrisSelect, onBackgroundClick])
 
   // Resolve each route label to a Cesium position.  Depot is prepended so the
   // depot -> first-debris leg actually draws; without it the polyline only
@@ -160,6 +205,7 @@ export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 's
         ignoring our flex layout and covering the sidebar. Size it to the
         parent div instead so the PlanForm/ReasoningPanel column stays visible. */}
     <Viewer
+      ref={viewerRef}
       timeline={false}
       animation={false}
       style={{ width: '100%', height: '100%' }}
@@ -187,16 +233,34 @@ export default function DebrisGlobe({ debrisField, route, depot, routeStyle = 's
         .map((debris) => {
           const isVisited    = visitedIds && visitedIds.has(debris.norad_id)
           const isNonVisited = visitedIds && !visitedIds.has(debris.norad_id)
-          // isVisited:    explicitly on the route    -> +2 px, full color
-          // isNonVisited: route exists, not on it   -> normal px, dimmed (unless 'all')
-          // neither:      no route active            -> normal px, full color
-          const color = (focusMode === 'all' || !isNonVisited)
-            ? riskColor(debris.risk_score)
-            : riskColor(debris.risk_score).withAlpha(0.3)
+
+          // --- Debris-selection dimming (takes priority over route focus mode) ---
+          // When a debris is selected: selected dot = full brightness, boosted size;
+          // all others = 0.15 alpha (strong dim so the selected dot pops clearly).
+          // When nothing is selected: fall back to the existing focusMode logic.
+          let color
+          let pixelSize = isVisited ? riskSize(debris.risk_score) + 2 : riskSize(debris.risk_score)
+
+          if (selectedDebrisId !== null) {
+            if (debris.norad_id === selectedDebrisId) {
+              // Selected entity: full brightness + slight size boost
+              color = riskColor(debris.risk_score)
+              pixelSize = riskSize(debris.risk_score) + 4
+            } else {
+              // All other entities: dimmed so the selected one stands out
+              color = riskColor(debris.risk_score).withAlpha(0.15)
+            }
+          } else {
+            // No selection active — use existing focusMode behaviour
+            color = (focusMode === 'all' || !isNonVisited)
+              ? riskColor(debris.risk_score)
+              : riskColor(debris.risk_score).withAlpha(0.3)
+          }
+
           return (
-            <Entity key={debris.norad_id} position={debrisPosition(debris)} name={debris.name}>
+            <Entity key={debris.norad_id} id={String(debris.norad_id)} position={debrisPosition(debris)} name={debris.name}>
               <PointGraphics
-                pixelSize={isVisited ? riskSize(debris.risk_score) + 2 : riskSize(debris.risk_score)}
+                pixelSize={pixelSize}
                 color={color}
               />
             </Entity>
