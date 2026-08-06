@@ -538,8 +538,8 @@ h1, h2, h3 {
    --------------------------------------------------------------------- */
 .cache-chip {
   position: absolute;
-  bottom: 10px;
-  left: 10px;
+  top: 12px;
+  left: 12px;
   z-index: 10;
   display: flex;
   align-items: center;
@@ -809,4 +809,162 @@ h1, h2, h3 {
    --------------------------------------------------------------------- */
 .history-status--error {
   color: var(--c-ink);
+}
+
+/* ---------------------------------------------------------------------
+   History entry — pickable highlight (replan base selection mode)
+   --------------------------------------------------------------------- */
+.history-entry--pickable {
+  cursor: pointer;
+  border-color: var(--c-steel);
+}
+.history-entry--pickable .history-entry-header {
+  color: var(--c-ink);
+}
+
+/* ---------------------------------------------------------------------
+   Replan pick hint — inline hint inside working-sticky
+   --------------------------------------------------------------------- */
+.replan-pick-hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0 2px;
+}
+
+/* ---------------------------------------------------------------------
+   Replan draft card
+   --------------------------------------------------------------------- */
+.replan-draft-card {
+  border-color: var(--c-steel);
+}
+
+.replan-draft-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 10px;
+}
+
+/* Style the textarea inside ReplanInput to match existing .mission-form inputs */
+.replan textarea {
+  background: var(--c-panel-raised);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  color: var(--c-ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 7px 9px;
+  resize: vertical;
+  min-height: 60px;
+}
+.replan textarea:focus {
+  border-color: var(--c-steel);
+}
+
+/* ---------------------------------------------------------------------
+   Custom selection banner — floating over the globe
+   --------------------------------------------------------------------- */
+.custom-selection-banner {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(11, 11, 12, 0.88);
+  border: 1px solid var(--c-steel);
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.custom-selection-count {
+  font-size: 12px;
+  color: var(--c-ink);
+  letter-spacing: 0.04em;
+  min-width: 6ch;
+}
+
+/* ---------------------------------------------------------------------
+   Custom selection summary card — overlays the globe (bottom-right)
+   --------------------------------------------------------------------- */
+.custom-selection-summary {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  z-index: 20;
+  width: 300px;
+  background: var(--c-panel);
+  border: 1px solid var(--c-line);
+}
+
+/* Scroll only kicks in when the list grows long — not for 3 items */
+.custom-selection-list-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.custom-selection-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.custom-selection-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.custom-selection-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--c-line);
+}
+.custom-selection-item:last-child {
+  border-bottom: none;
+}
+
+.custom-selection-name {
+  font-family: var(--font-body);
+  color: var(--c-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+  margin-right: 8px;
+}
+
+.custom-selection-norad {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  flex-shrink: 0;
+}
+
+/* ---------------------------------------------------------------------
+   History live result — AI/Naive toggle inside latest expanded entry
+   --------------------------------------------------------------------- */
+.history-live-result {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--c-line);
 }

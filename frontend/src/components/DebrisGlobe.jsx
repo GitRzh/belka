@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Viewer, Entity, PolylineGraphics, PointGraphics } from 'resium'
-import { Cartesian3, Color, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
+import { Cartesian3, Color, Credit, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
 
 // Spherical linear interpolation between two Cartesian3 positions.
 // Returns `steps` points from `a` up to (but not including) `b`.
@@ -118,7 +118,10 @@ export default function DebrisGlobe({
   focusMode = 'dim',
   selectedDebrisId = null,
   isModalPinned = false,
+  customSelecting = false,
+  customSelectedIds = null,
   onDebrisSelect,
+  onDebrisToggleSelect,
   onBackgroundClick,
 }) {
   const viewerRef = useRef(null)
@@ -140,8 +143,13 @@ export default function DebrisGlobe({
         // <Entity key={norad_id}> which Cesium stores as the entity id string.
         const clickedId = Number(picked.id.id ?? picked.id)
         const debris = debrisField.find((d) => d.norad_id === clickedId)
-        if (debris && onDebrisSelect) {
-          onDebrisSelect(debris)
+        if (debris) {
+          if (customSelecting && onDebrisToggleSelect) {
+            // Custom selection mode: toggle membership, suppress the info modal path
+            onDebrisToggleSelect(debris)
+          } else if (onDebrisSelect) {
+            onDebrisSelect(debris)
+          }
         }
       } else {
         // Clicked empty globe background
@@ -155,7 +163,14 @@ export default function DebrisGlobe({
       // whole handler (other Cesium internals may still need it intact).
       handler.removeInputAction(ScreenSpaceEventType.LEFT_CLICK)
     }
-  }, [debrisField, onDebrisSelect, onBackgroundClick])
+  }, [debrisField, customSelecting, onDebrisSelect, onDebrisToggleSelect, onBackgroundClick])
+
+  // Remove the default "Powered by Cesium" watermark from the bottom-left.
+  // Called via <Viewer onReady> so the cesiumElement is guaranteed non-null
+  // (the useEffect approach fails because cesiumElement is null at mount time).
+  function handleViewerReady(viewer) {
+    viewer.creditDisplay.removeStaticCredit(Credit.CESIUM_CREDIT)
+  }
 
   // Resolve each route label to a Cesium position.  Depot is prepended so the
   // depot -> first-debris leg actually draws; without it the polyline only
@@ -195,7 +210,7 @@ export default function DebrisGlobe({
     <div className="globe-viewport">
     {ageMin !== null && (
       <div className={`cache-chip${cacheMetadata?.data_stale ? ' cache-chip--stale' : ''}`}>
-        {`Debris data: ${ageMin} min old`}
+        {`Data: ${ageMin} min old`}
         {cacheMetadata?.data_stale && (
           <span className="stale-tag">refreshing soon</span>
         )}
@@ -209,6 +224,7 @@ export default function DebrisGlobe({
       timeline={false}
       animation={false}
       style={{ width: '100%', height: '100%' }}
+      onReady={handleViewerReady}
     >
       {/* Depot marker: distinct cyan dot so it's visually separate from the
           risk-colored debris dots. Rendered only when a plan/depot exists. */}
@@ -241,7 +257,17 @@ export default function DebrisGlobe({
           let color
           let pixelSize = isVisited ? riskSize(debris.risk_score) + 2 : riskSize(debris.risk_score)
 
-          if (selectedDebrisId !== null) {
+          if (customSelecting && customSelectedIds) {
+            // Custom selection mode: all debris stay full opacity; only selected
+            // ones get a distinct cyan highlight. No dimming of unselected dots —
+            // the user needs to keep seeing the full field to pick more targets.
+            color = customSelectedIds.has(debris.norad_id)
+              ? Color.fromCssColorString('#00e5ff').withAlpha(0.95)
+              : riskColor(debris.risk_score)   // full opacity, unchanged
+            if (customSelectedIds.has(debris.norad_id)) {
+              pixelSize = riskSize(debris.risk_score) + 6
+            }
+          } else if (selectedDebrisId !== null) {
             if (debris.norad_id === selectedDebrisId) {
               // Selected entity: full brightness + slight size boost
               color = riskColor(debris.risk_score)

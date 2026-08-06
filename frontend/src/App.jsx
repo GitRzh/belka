@@ -5,7 +5,7 @@ import ReasoningPanel from './components/ReasoningPanel.jsx'
 import ReplanInput from './components/ReplanInput.jsx'
 import MissionClock from './components/MissionClock.jsx'
 import DebrisInfoModal from './components/DebrisInfoModal.jsx'
-import StatusStrip from './components/StatusStrip.jsx'
+import CustomSelectionSummary from './components/CustomSelectionSummary.jsx'
 import { api } from './api.js'
 
 export default function App() {
@@ -16,7 +16,6 @@ export default function App() {
   const [selectedDebris, setSelectedDebris] = useState(null) // debris object clicked on the globe
   const [isDebrisModalPinned, setIsDebrisModalPinned] = useState(false)
 
-  const [lastPlanRequest, setLastPlanRequest] = useState(null) // needed for /replan body
   const [plan, setPlan] = useState(null) // current active plan shown on the globe
   const [naivePlan, setNaivePlan] = useState(null)
   const [routeMode, setRouteMode] = useState('ai') // 'ai' | 'naive'
@@ -27,6 +26,15 @@ export default function App() {
   const [planning, setPlanning] = useState(false)
   const [replanning, setReplanning] = useState(false)
   const [formError, setFormError] = useState(null)
+
+  // Replan flow state
+  const [pickingReplanBase, setPickingReplanBase] = useState(false)
+  const [replanDraftBase, setReplanDraftBase] = useState(null) // entry or null
+
+  // Custom selection state
+  const [customSelecting, setCustomSelecting] = useState(false)
+  const [customSelectedIds, setCustomSelectedIds] = useState(new Set())
+  const [customSelectionDone, setCustomSelectionDone] = useState(false) // show summary card
 
   useEffect(() => {
     api
@@ -55,11 +63,11 @@ export default function App() {
     const id = crypto.randomUUID()
     // L2: slice to last MAX_HISTORY entries so memory stays bounded
     setHistory(h => [...h, { id, kind: 'plan', status: 'running', params: payload, result: null, error: null }].slice(-MAX_HISTORY))
-    setExpandedIds(s => new Set([...s, id]))
+    // Only the newest entry auto-expands; replaces the set instead of adding to it
+    setExpandedIds(new Set([id]))
     try {
       const result = await api.plan(payload)
       setPlan(result)
-      setLastPlanRequest(payload)
       setRouteMode('ai')
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', result } : e))
     } catch (err) {
@@ -73,15 +81,17 @@ export default function App() {
     }
   }
 
-  async function handleReplan(userRequestText) {
-    if (!lastPlanRequest) return
+  // baseParams: the params of the entry being branched from (replaces lastPlanRequest)
+  async function handleReplan(baseParams, userRequestText) {
     setReplanning(true)
     setFormError(null)
-    const replanParams = { ...lastPlanRequest, user_request_text: userRequestText }
+    const replanParams = { ...baseParams, user_request_text: userRequestText }
     const id = crypto.randomUUID()
     // L2: same cap as handleGeneratePlan
     setHistory(h => [...h, { id, kind: 'replan', status: 'running', params: replanParams, result: null, error: null }].slice(-MAX_HISTORY))
-    setExpandedIds(s => new Set([...s, id]))
+    // Only the newest entry auto-expands
+    setExpandedIds(new Set([id]))
+    setReplanDraftBase(null)
     try {
       const result = await api.replan(replanParams)
       setPlan(result.new_plan)
@@ -98,8 +108,11 @@ export default function App() {
   async function handleToggleNaive() {
     if (routeMode === 'ai') {
       if (!naivePlan) {
+        // Use the latest done plan entry's params as the base
+        const latestDone = [...history].reverse().find(e => e.status === 'done')
+        if (!latestDone) return
         try {
-          const result = await api.getNaiveRoute(lastPlanRequest)
+          const result = await api.getNaiveRoute(latestDone.params)
           setNaivePlan(result)
         } catch (err) {
           setFormError(err.message)
@@ -125,6 +138,15 @@ export default function App() {
 
   function handleDebrisModalTogglePin() {
     setIsDebrisModalPinned((prev) => !prev)
+  }
+
+  // Toggle membership of a debris object in the custom selection set
+  function handleDebrisToggleSelect(debris) {
+    setCustomSelectedIds(prev => {
+      const next = new Set(prev)
+      next.has(debris.norad_id) ? next.delete(debris.norad_id) : next.add(debris.norad_id)
+      return next
+    })
   }
 
   // Produces a compact [label, value] list for a plan/replan params object.
@@ -160,9 +182,30 @@ export default function App() {
     })
   }
 
+  // Entry-header click handler — differs based on whether we're picking a replan base
+  function handleEntryHeaderClick(entry) {
+    if (pickingReplanBase) {
+      selectReplanBase(entry)
+    } else {
+      toggleExpanded(entry.id)
+    }
+  }
+
+  function selectReplanBase(entry) {
+    setPickingReplanBase(false)
+    setReplanDraftBase(entry)
+  }
+
+  function cancelReplan() {
+    setPickingReplanBase(false)
+    setReplanDraftBase(null)
+  }
+
   // Disable All/Dim/Focus when there's nothing meaningful to toggle:
   // no active plan, or plan exists but visited nothing (empty route / 0 visits).
   const focusButtonsDisabled = !activePlan || !(activePlan.visited_count > 0)
+
+  const latestEntry = history.length > 0 ? history[history.length - 1] : null
 
   if (debrisFieldError) {
     return (
@@ -187,13 +230,6 @@ export default function App() {
         </div>
       </header>
 
-      <StatusStrip
-        routeMode={routeMode}
-        focusMode={focusMode}
-        activePlan={activePlan}
-        cacheMetadata={cacheMetadata}
-      />
-
       <div className="app-body">
         <aside className="mission-column">
           <section className="panel reticle">
@@ -213,10 +249,6 @@ export default function App() {
               {formError}
             </div>
           )}
-
-          <section className="panel reticle">
-            <ReplanInput onReplan={handleReplan} submitting={replanning} disabled={!plan} />
-          </section>
         </aside>
 
         <div className="globe-pane reticle" style={{ position: 'relative' }}>
@@ -229,11 +261,49 @@ export default function App() {
             focusMode={focusMode}
             selectedDebrisId={selectedDebris?.norad_id ?? null}
             isModalPinned={isDebrisModalPinned}
+            customSelecting={customSelecting}
+            customSelectedIds={customSelectedIds}
             onDebrisSelect={handleDebrisSelect}
+            onDebrisToggleSelect={handleDebrisToggleSelect}
             onBackgroundClick={() => {
               if (!isDebrisModalPinned) handleDebrisModalClose()
             }}
           />
+          {/* Custom selection banner */}
+          {customSelecting && (
+            <div className="custom-selection-banner">
+              <span className="custom-selection-count">{customSelectedIds.size} selected</span>
+              <button
+                className="btn btn-primary"
+                onClick={() => {
+                  setCustomSelecting(false)
+                  setCustomSelectionDone(true)
+                }}
+              >
+                Finish Selection
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  setCustomSelecting(false)
+                  setCustomSelectedIds(new Set())
+                  setCustomSelectionDone(false)
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          {customSelectionDone && !customSelecting && (
+            <CustomSelectionSummary
+              debrisField={debrisField}
+              selectedIds={customSelectedIds}
+              onClose={() => {
+                setCustomSelectionDone(false)
+                setCustomSelectedIds(new Set())
+              }}
+            />
+          )}
           <DebrisInfoModal
             selectedDebris={selectedDebris}
             isModalPinned={isDebrisModalPinned}
@@ -243,55 +313,87 @@ export default function App() {
         </div>
 
         <aside className="working-column">
-          {plan && (
-            <div className="working-sticky">
-              <div className="working-sticky-label">Routing strategy</div>
-              <button className="btn btn-toggle" onClick={handleToggleNaive} style={{ width: '100%' }}>
-                {routeMode === 'ai' ? 'Switch to nearest-neighbour route' : 'Switch to AI-optimised route'}
-              </button>
-              <div className="working-sticky-label" style={{ marginTop: 6 }}>Visualisation mode</div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                {[
-                  { id: 'all',   label: 'Show all debris' },
-                  { id: 'dim',   label: 'Highlight route' },
-                  { id: 'focus', label: 'Route only' },
-                ].map(({ id, label }) => (
-                  <button
-                    key={id}
-                    className={`btn btn-toggle${focusMode === id ? ' btn-primary' : ''}`}
-                    onClick={() => setFocusMode(id)}
-                    disabled={focusButtonsDisabled}
-                    title={focusButtonsDisabled ? 'Generate a plan first to enable this control' : undefined}
-                    style={{ flex: 1 }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+          <div className="working-sticky">
+            {/* ── Visualization ─────────────────────────────────── */}
+            <div className="working-sticky-label">Visualization</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[
+                { id: 'all',   label: 'All' },
+                { id: 'dim',   label: 'Highlight' },
+                { id: 'focus', label: 'Route only' },
+              ].map(({ id, label }) => (
+                <button
+                  key={id}
+                  className={`btn btn-toggle${focusMode === id ? ' btn-primary' : ''}`}
+                  onClick={() => setFocusMode(id)}
+                  disabled={focusButtonsDisabled}
+                  title={focusButtonsDisabled ? 'Generate a plan first to enable this control' : undefined}
+                  style={{ flex: 1 }}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-          )}
 
-          {/* Active-plan stats panel: always reflects the currently displayed
-              route (AI or naive). Separate from history cards so toggling the
-              route mode visibly updates the numbers without re-expanding anything. */}
-          {activePlan && (
-            <div className="panel reticle">
-              <h2 className="panel-title" style={{ marginBottom: 4 }}>
-                {routeMode === 'naive' ? 'Nearest-neighbour route — active' : 'AI-optimised route — active'}
-              </h2>
-              <ReasoningPanel
-                plan={activePlan}
-                explanationOverride={
-                  routeMode === 'naive'
-                    ? 'Nearest-neighbor baseline (no AI optimization)'
-                    : undefined
-                }
+            {/* ── Tools ─────────────────────────────────────────── */}
+            <div className="working-sticky-label" style={{ marginTop: 8 }}>Tools</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                className="btn"
+                style={{ flex: 1 }}
+                disabled={pickingReplanBase || history.length === 0}
+                title={history.length === 0 ? 'Generate a plan first.' : undefined}
+                onClick={() => {
+                  setExpandedIds(new Set())
+                  setPickingReplanBase(true)
+                  setReplanDraftBase(null)
+                }}
+              >
+                Replan
+              </button>
+              <button
+                className="btn"
+                style={{ flex: 1 }}
+                disabled={customSelecting}
+                onClick={() => {
+                  setCustomSelecting(true)
+                  setCustomSelectedIds(new Set())
+                  setCustomSelectionDone(false)
+                }}
+              >
+                Custom selection
+              </button>
+            </div>
+
+            {/* Picking hint */}
+            {pickingReplanBase && (
+              <div className="replan-pick-hint">
+                Select a plan to replan from
+                <button className="btn" style={{ marginLeft: 8 }} onClick={cancelReplan}>Cancel</button>
+              </div>
+            )}
+          </div>
+
+          {/* Draft replan card — shown when a base entry has been selected */}
+          {replanDraftBase && (
+            <div className="panel reticle replan-draft-card">
+              <div className="replan-draft-label">
+                Based on: #{history.findIndex(e => e.id === replanDraftBase.id) + 1}{' '}
+                <span className="history-kind">{replanDraftBase.kind === 'plan' ? 'Plan' : 'Modification'}</span>
+              </div>
+              <ReplanInput
+                baseEntry={replanDraftBase}
+                onReplan={(text) => handleReplan(replanDraftBase.params, text)}
+                onCancel={cancelReplan}
+                submitting={replanning}
               />
             </div>
           )}
 
           {[...history].reverse().map((entry) => {
             const isExpanded = expandedIds.has(entry.id)
+            const isLatest = entry.id === latestEntry?.id
+            const isPickable = pickingReplanBase
             // One-line summary always shown below the header, even when collapsed.
             let summary = null
             if (entry.status === 'done' && entry.kind === 'plan') {
@@ -305,10 +407,13 @@ export default function App() {
               summary = entry.error ?? 'Unknown error'
             }
             return (
-              <div key={entry.id} className="panel reticle history-entry">
+              <div
+                key={entry.id}
+                className={`panel reticle history-entry${isPickable ? ' history-entry--pickable' : ''}`}
+              >
                 <div
                   className="history-entry-header"
-                  onClick={() => toggleExpanded(entry.id)}
+                  onClick={() => handleEntryHeaderClick(entry)}
                   role="button"
                   aria-expanded={isExpanded}
                 >
@@ -331,46 +436,70 @@ export default function App() {
                         </Fragment>
                       ))}
                     </dl>
-                    {entry.status === 'done' && entry.kind === 'plan' && (
-                      <ReasoningPanel plan={entry.result} />
-                    )}
-                    {entry.status === 'done' && entry.kind === 'replan' && (
-                      <div className="replan-result">
-                        {/* Diff-level view: what changed between old and new plan */}
-                        {entry.result.explanation && (
-                          <p className="explanation">{entry.result.explanation}</p>
+                    {/* Latest done entry: live AI/Naive toggle instead of static result */}
+                    {isLatest && entry.status === 'done' ? (
+                      <div className="history-live-result">
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                          <span className="working-sticky-label">
+                            {routeMode === 'naive' ? 'Nearest-neighbour route' : 'AI-optimised route'}
+                          </span>
+                          <button className="btn btn-toggle" onClick={handleToggleNaive} style={{ fontSize: 11, padding: '4px 10px' }}>
+                            {routeMode === 'ai' ? 'AI Route' : 'Naive Route'}
+                          </button>
+                        </div>
+                        <ReasoningPanel
+                          plan={activePlan}
+                          explanationOverride={
+                            routeMode === 'naive'
+                              ? 'Nearest-neighbor baseline (no AI optimization)'
+                              : undefined
+                          }
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        {entry.status === 'done' && entry.kind === 'plan' && (
+                          <ReasoningPanel plan={entry.result} />
                         )}
-                        {entry.result.overrides_applied && Object.keys(entry.result.overrides_applied).length > 0 && (
-                          <div className="overrides">
-                            Overrides applied:{' '}
-                            {Object.entries(entry.result.overrides_applied)
-                              .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
-                              .join(', ')}
+                        {entry.status === 'done' && entry.kind === 'replan' && (
+                          <div className="replan-result">
+                            {/* Diff-level view: what changed between old and new plan */}
+                            {entry.result.explanation && (
+                              <p className="explanation">{entry.result.explanation}</p>
+                            )}
+                            {entry.result.overrides_applied && Object.keys(entry.result.overrides_applied).length > 0 && (
+                              <div className="overrides">
+                                Overrides applied:{' '}
+                                {Object.entries(entry.result.overrides_applied)
+                                  .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
+                                  .join(', ')}
+                              </div>
+                            )}
+                            {entry.result.diff && (
+                              <dl>
+                                {entry.result.diff.added?.length > 0 && (
+                                  <><dt>Added stops</dt><dd>{entry.result.diff.added.join(', ')}</dd></>
+                                )}
+                                {entry.result.diff.dropped?.length > 0 && (
+                                  <><dt>Dropped stops</dt><dd>{entry.result.diff.dropped.join(', ')}</dd></>
+                                )}
+                                <dt>Fuel Δ</dt>
+                                <dd>{entry.result.diff.fuel_delta_km_s > 0 ? '+' : ''}{entry.result.diff.fuel_delta_km_s} km/s</dd>
+                                <dt>Risk Δ</dt>
+                                <dd>{entry.result.diff.risk_delta > 0 ? '+' : ''}{entry.result.diff.risk_delta}</dd>
+                              </dl>
+                            )}
+                            {/* Full new-plan breakdown: visited count, fuel, risk, steps, warnings.
+                                new_plan has the same shape as a /plan result, so ReasoningPanel
+                                renders it identically — including surfacing any warning when
+                                visited_count == 0 (e.g. the constraint tightened too hard). */}
+                            <ReasoningPanel plan={entry.result.new_plan} />
                           </div>
                         )}
-                        {entry.result.diff && (
-                          <dl>
-                            {entry.result.diff.added?.length > 0 && (
-                              <><dt>Added stops</dt><dd>{entry.result.diff.added.join(', ')}</dd></>
-                            )}
-                            {entry.result.diff.dropped?.length > 0 && (
-                              <><dt>Dropped stops</dt><dd>{entry.result.diff.dropped.join(', ')}</dd></>
-                            )}
-                            <dt>Fuel Δ</dt>
-                            <dd>{entry.result.diff.fuel_delta_km_s > 0 ? '+' : ''}{entry.result.diff.fuel_delta_km_s} km/s</dd>
-                            <dt>Risk Δ</dt>
-                            <dd>{entry.result.diff.risk_delta > 0 ? '+' : ''}{entry.result.diff.risk_delta}</dd>
-                          </dl>
+                        {entry.status === 'error' && (
+                          <p className="history-error">{entry.error}</p>
                         )}
-                        {/* Full new-plan breakdown: visited count, fuel, risk, steps, warnings.
-                            new_plan has the same shape as a /plan result, so ReasoningPanel
-                            renders it identically — including surfacing any warning when
-                            visited_count == 0 (e.g. the constraint tightened too hard). */}
-                        <ReasoningPanel plan={entry.result.new_plan} />
-                      </div>
-                    )}
-                    {entry.status === 'error' && (
-                      <p className="history-error">{entry.error}</p>
+                      </>
                     )}
                   </>
                 )}

@@ -448,24 +448,11 @@ def _explain_removal_method(
 ) -> tuple[str, str]:
     """Return (explanation, source) for a removal_method recommendation.
 
-    source is "llm" when the Groq call succeeded, "fallback" when it failed
-    or returned nothing usable.  The explanation is cached by removal_method
-    alone: only 3 distinct values exist in removal_method.py, so the cache is
-    bounded at 3 entries and generic enough to reuse across every object with
-    the same method, never referencing a specific object or norad_id."""
+    Cached by removal_method alone: only 3 distinct values exist in
+    removal_method.py, so the cache is bounded at 3 entries and generic
+    enough to reuse across every object with the same method."""
     if removal_method in _REMOVAL_METHOD_EXPLANATION_CACHE:
         return _REMOVAL_METHOD_EXPLANATION_CACHE[removal_method]
-
-    # Build a deterministic fallback first so we always have something to
-    # cache even if the LLM call never fires.
-    maturity_summary = ", ".join(
-        f"{m} ({method_maturity.get(m, 'unknown maturity')})"
-        for m in possible_methods
-    )
-    fallback = (
-        f"Recommended technique: {removal_method.replace('_', ' ')}. "
-        f"Applicable method(s): {maturity_summary}."
-    )
 
     prompt = (
         "You are a technical writer for an orbital debris removal programme. "
@@ -486,78 +473,38 @@ def _explain_removal_method(
         "Output only the 1-2 sentence explanation — no JSON, no markdown, no preamble."
     )
 
-    try:
-        resp = _groq_client().chat.completions.create(
-            model="llama3-70b-8192",  # H2: was "openai/gpt-oss-120b" (not a valid Groq model)
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        if not text:
-            raise ValueError("empty response from LLM")
-        result: tuple[str, str] = (text, "llm")
-    except (groq_module.APIConnectionError, groq_module.RateLimitError,
-            groq_module.BadRequestError, groq_module.NotFoundError) as exc:
-        logger.warning(
-            "[_explain_removal_method] Groq error for %r, using fallback: %s",
-            removal_method, exc,
-        )
-        result = (fallback, "fallback")
-    except Exception as exc:  # malformed response, ValueError from empty check, etc.
-        logger.warning(
-            "[_explain_removal_method] unexpected error for %r, using fallback: %s",
-            removal_method, exc,
-        )
-        result = (fallback, "fallback")
-
+    resp = _groq_client().chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+    text = (resp.choices[0].message.content or "").strip()
+    result: tuple[str, str] = (text, "llm")
     _REMOVAL_METHOD_EXPLANATION_CACHE[removal_method] = result
     return result
 
 
 
 def _parse_overrides(user_text: str, req: "PlanRequest") -> dict[str, Any]:
-    """Call llama3-8b-8192 in json_object mode to extract parameter overrides.
-    Retries once on malformed JSON, then raises ValueError."""
-    client = _groq_client()
+    """Call llama-3.1-8b-instant in json_object mode to extract parameter overrides."""
     system_prompt = _build_parse_prompt(req)
-    last_raw = ""
-    for attempt in range(2):
-        try:
-            resp = client.chat.completions.create(
-                model="llama3-8b-8192",  # H2: was "openai/gpt-oss-20b" (not a valid Groq model)
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_text},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
-            last_raw = resp.choices[0].message.content or ""
-            logger.debug("[_parse_overrides] raw LLM response: %r", last_raw)
-            raw = json.loads(last_raw)
-            return {k: v for k, v in raw.items() if k in _ALLOWED_OVERRIDE_KEYS}
-        except json.JSONDecodeError:
-            if attempt == 1:
-                raise ValueError(
-                    f"LLM returned malformed JSON after retry. Raw response: {last_raw!r}"
-                )
-            # first attempt failed -- retry once
-        except (groq_module.APIConnectionError, groq_module.RateLimitError,
-                groq_module.BadRequestError, groq_module.NotFoundError) as exc:
-            # APIConnectionError is the base of APITimeoutError — catches both
-            # a clean timeout and cases where the connection is refused/reset
-            # before the timeout fires (e.g. absurdly low timeout values).
-            # BadRequestError / NotFoundError: invalid model name or API key issue
-            # — raise 503 so the caller gets a clear error rather than a crash.
-            raise HTTPException(
-                status_code=503,
-                detail=f"Groq API unavailable: {exc}",
-            ) from exc
-    return {}  # unreachable; satisfies type-checker
+    resp = _groq_client().chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_text},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+    last_raw = resp.choices[0].message.content or ""
+    logger.debug("[_parse_overrides] raw LLM response: %r", last_raw)
+    raw = json.loads(last_raw)
+    return {k: v for k, v in raw.items() if k in _ALLOWED_OVERRIDE_KEYS}
 
 
 def _explain_diff(diff: dict[str, Any]) -> str:
-    """Call llama3-70b-8192 with ONLY the diff dict to generate a
+    """Call openai/gpt-oss-120b with ONLY the diff dict to generate a
     2-3 sentence plain-language explanation. Raw route data is never passed."""
     prompt = (
         "You are a mission-briefing assistant for an orbital debris removal programme. "
@@ -574,37 +521,17 @@ def _explain_diff(diff: dict[str, Any]) -> str:
         "Output only the explanation -- no JSON, no markdown.\n\n"
         + json.dumps(diff)
     )
-    last_raw = ""
-    for attempt in range(2):
-        try:
-            resp = _groq_client().chat.completions.create(
-                model="llama3-70b-8192",  # H2: was "openai/gpt-oss-120b" (not a valid Groq model)
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-            )
-            last_raw = resp.choices[0].message.content or ""
-            return last_raw.strip()
-        except json.JSONDecodeError:
-            if attempt == 1:
-                raise ValueError(
-                    f"Explanation LLM returned malformed response after retry. Raw: {last_raw!r}"
-                )
-        except (groq_module.APIConnectionError, groq_module.RateLimitError,
-                groq_module.BadRequestError, groq_module.NotFoundError) as exc:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Groq API unavailable: {exc}",
-            ) from exc
-    return ""  # unreachable
+    resp = _groq_client().chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+    return (resp.choices[0].message.content or "").strip()
 
 
 def _explain_plan(route_result: dict[str, Any]) -> Optional[str]:
-    """Call llama3-70b-8192 with route_details (+ skip context) to
-    generate a 2-3 sentence plain-language mission briefing. Soft-fails:
-    on any LLM error, returns None instead of raising, so /plan always
-    returns the route even if narration is unavailable. Retries once
-    with a short backoff -- but NOT on RateLimitError, since retrying
-    into an active rate limit only makes it worse."""
+    """Call openai/gpt-oss-120b with route_details (+ skip context) to
+    generate a 2-3 sentence plain-language mission briefing."""
     details = route_result.get("route_details", [])
     if not details:
         return None  # nothing visited -- the `warning` field already covers this case
@@ -632,27 +559,12 @@ def _explain_plan(route_result: dict[str, Any]) -> Optional[str]:
         })
     )
 
-    last_raw = ""
-    for attempt in range(2):
-        try:
-            resp = _groq_client().chat.completions.create(
-                model="llama3-70b-8192",  # H2: was "openai/gpt-oss-120b" (not a valid Groq model)
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-            )
-            last_raw = resp.choices[0].message.content or ""
-            return last_raw.strip()
-        except groq_module.RateLimitError as exc:
-            # Do not retry -- retrying into a live rate limit just digs deeper.
-            logger.warning("[_explain_plan] rate limited, not retrying: %s", exc)
-            return None
-        except (groq_module.APIConnectionError,
-                groq_module.BadRequestError, groq_module.NotFoundError) as exc:
-            if attempt == 1:
-                logger.warning("[_explain_plan] Groq error after retry: %s", exc)
-                return None
-            time.sleep(1.5)  # brief backoff before the single retry, not an immediate re-hit
-    return None  # unreachable; satisfies type-checker
+    resp = _groq_client().chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+    return (resp.choices[0].message.content or "").strip()
 
 
 def _norad_ids_from_plan(plan_result: dict[str, Any]) -> set[int]:
@@ -973,6 +885,12 @@ def naive_route(
     elapsed_days = 0.0  # cumulative mission time, same convention as optimizer.py
     steps: list[dict[str, Any]] = []
 
+    # Must be defined before the while loop — called inside it at each step.
+    def _label(obj: dict) -> str:
+        if obj["norad_id"] == -1:
+            return obj["name"]
+        return f"{obj['name']} ({obj['norad_id']})"
+
     while remaining:
         next_idx = min(remaining, key=lambda j: matrix[current][j])
         hop_cost = matrix[current][next_idx]
@@ -1035,15 +953,6 @@ def naive_route(
     )
 
     skipped_objects = [nodes[i] for i in range(1, len(nodes)) if i not in set(visited_idx)]
-
-    # Mirror optimizer.py's _label() so route and skipped_names carry
-    # "Name (norad_id)" labels.  DebrisGlobe.jsx's noradIdFromRouteLabel()
-    # regex requires the trailing "(digits)" to resolve positions; plain
-    # names produce null IDs and the polyline never draws.
-    def _label(obj: dict) -> str:
-        if obj["norad_id"] == -1:
-            return obj["name"]
-        return f"{obj['name']} ({obj['norad_id']})"
 
     result = {
         "route": [_label(o) for o in visited_objects],

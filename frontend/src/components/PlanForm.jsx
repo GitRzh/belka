@@ -33,7 +33,6 @@ export default function PlanForm({ onSubmit, onChange, submitting }) {
     risk_penalty_scale: '',
     nets_carried: '',
     removal_method_filter: '',
-    target_norad_id: '',
     start_raan_deg: '',
     // weights is a nested object per the API surface — left as raw JSON
     // text for now since its shape isn't pinned down yet in the backend docs.
@@ -100,7 +99,6 @@ export default function PlanForm({ onSubmit, onChange, submitting }) {
     if (advanced.risk_penalty_scale) payload.risk_penalty_scale = Number(advanced.risk_penalty_scale)
     if (advanced.nets_carried) payload.nets_carried = Number(advanced.nets_carried)
     if (advanced.removal_method_filter) payload.removal_method_filter = advanced.removal_method_filter
-    if (advanced.target_norad_id) payload.target_norad_id = advanced.target_norad_id
     if (advanced.start_raan_deg !== '') payload.start_raan_deg = Number(advanced.start_raan_deg)
 
     if (advanced.weights_json) {
@@ -267,16 +265,6 @@ export default function PlanForm({ onSubmit, onChange, submitting }) {
                 </option>
               ))}
             </select>
-          </label>
-
-          <label className="field">
-            Force include NORAD ID
-            <input
-              type="text"
-              placeholder="e.g. 22675"
-              value={advanced.target_norad_id}
-              onChange={(e) => updateAdvanced('target_norad_id', e.target.value)}
-            />
           </label>
 
           <label className="field">
