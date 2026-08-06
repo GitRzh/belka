@@ -6,7 +6,7 @@ import { api } from '../api'
 
 const REMOVAL_METHOD_FILTER_OPTIONS = ['', 'robotic_arm_or_net_capture', 'net_capture']
 
-export default function PlanForm({ onSubmit, submitting }) {
+export default function PlanForm({ onSubmit, onChange, submitting }) {
   // 'site' | 'raw' — which start-position mode is active
   const [startMode, setStartMode] = useState('site')
 
@@ -24,7 +24,7 @@ export default function PlanForm({ onSubmit, submitting }) {
   const [required, setRequired] = useState({
     start_altitude_km: '',
     start_inclination_deg: '',
-    fuel_budget_km_s: '',
+    fuel_budget_km_s: '2.5',  // C1: sensible default so the demo shows visible budget differences
   })
 
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -71,8 +71,15 @@ export default function PlanForm({ onSubmit, submitting }) {
   function handleSubmit(e) {
     e.preventDefault()
 
+    // M1: validate fuel budget before touching the API
+    const budgetNum = Number(required.fuel_budget_km_s)
+    if (!required.fuel_budget_km_s || !Number.isFinite(budgetNum) || budgetNum <= 0) {
+      alert('Fuel budget must be a positive number (e.g. 2.5 km/s)')
+      return
+    }
+
     const payload = {
-      fuel_budget_km_s: Number(required.fuel_budget_km_s),
+      fuel_budget_km_s: budgetNum,
     }
 
     if (startMode === 'site') {
@@ -112,39 +119,43 @@ export default function PlanForm({ onSubmit, submitting }) {
     <form className="mission-form" onSubmit={handleSubmit}>
 
       {/* ── Start position toggle ─────────────────────────────────── */}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button
-          type="button"
-          className={`btn btn-toggle${startMode === 'site' ? ' btn-primary' : ''}`}
-          style={{ flex: 1 }}
-          onClick={() => setStartMode('site')}
-        >
-          Launch site
-        </button>
-        <button
-          type="button"
-          className={`btn btn-toggle${startMode === 'raw' ? ' btn-primary' : ''}`}
-          style={{ flex: 1 }}
-          onClick={() => setStartMode('raw')}
-        >
-          Custom orbit
-        </button>
+      <div className="field">
+        <span>Start position</span>
+        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          <button
+            type="button"
+            className={`btn btn-toggle${startMode === 'site' ? ' btn-primary' : ''}`}
+            style={{ flex: 1 }}
+            onClick={() => { setStartMode('site'); onChange?.() }}
+          >
+            Launch site
+          </button>
+          <button
+            type="button"
+            className={`btn btn-toggle${startMode === 'raw' ? ' btn-primary' : ''}`}
+            style={{ flex: 1 }}
+            onClick={() => { setStartMode('raw'); onChange?.() }}
+          >
+            Custom orbit
+          </button>
+        </div>
       </div>
 
       {/* ── Launch-site mode ─────────────────────────────────────── */}
       {startMode === 'site' && (
         <>
           <label className="field">
-            Launch site
+            Select launch site
             <select
               required
               value={siteForm.launch_site}
               disabled={sitesLoading}
-              onChange={(e) =>
+              onChange={(e) => {
                 setSiteForm((prev) => ({ ...prev, launch_site: e.target.value }))
-              }
+                onChange?.()
+              }}
             >
-              {sitesLoading && <option value="">Loading…</option>}
+              {sitesLoading && <option value="">Loading sites…</option>}
               {siteOptions.map(([key, site]) => (
                 <option key={key} value={key}>
                   {site.name} — min {site.min_inclination}° incl, {site.lat}° lat
@@ -154,25 +165,26 @@ export default function PlanForm({ onSubmit, submitting }) {
           </label>
 
           <label className="field">
-            Inclination override (deg, optional)
+            Inclination override (optional)
             <input
               type="number"
               step="0.1"
-              placeholder={`Leave blank — uses site minimum`}
+              placeholder="Leave blank to use site default"
               value={siteForm.inclination_deg}
-              onChange={(e) =>
+              onChange={(e) => {
                 setSiteForm((prev) => ({ ...prev, inclination_deg: e.target.value }))
-              }
+                onChange?.()
+              }}
             />
           </label>
         </>
       )}
 
-      {/* ── Raw orbit mode (existing fields, unchanged) ───────────── */}
+      {/* ── Raw orbit mode ────────────────────────────────────────── */}
       {startMode === 'raw' && (
         <>
           <label className="field">
-            Start altitude (km)
+            Starting altitude (km)
             <input
               type="number"
               required
@@ -182,7 +194,7 @@ export default function PlanForm({ onSubmit, submitting }) {
           </label>
 
           <label className="field">
-            Start inclination (deg)
+            Starting inclination (deg)
             <input
               type="number"
               required
@@ -205,17 +217,18 @@ export default function PlanForm({ onSubmit, submitting }) {
         />
       </label>
 
-      {/* ── Advanced options — unchanged from before ─────────────── */}
+      {/* ── Advanced options ──────────────────────────────────────── */}
       <button type="button" className="btn" onClick={() => setAdvancedOpen((o) => !o)}>
-        {advancedOpen ? 'Hide advanced options' : 'Advanced options'}
+        {advancedOpen ? 'Hide advanced options' : 'Show advanced options'}
       </button>
 
       {advancedOpen && (
         <fieldset>
           <label className="field">
-            Pool size
+            Candidate pool size
             <input
               type="number"
+              placeholder="Default: 40"
               value={advanced.pool_size}
               onChange={(e) => updateAdvanced('pool_size', e.target.value)}
             />
@@ -226,6 +239,7 @@ export default function PlanForm({ onSubmit, submitting }) {
             <input
               type="number"
               step="0.01"
+              placeholder="Default: 3000"
               value={advanced.risk_penalty_scale}
               onChange={(e) => updateAdvanced('risk_penalty_scale', e.target.value)}
             />
@@ -235,36 +249,38 @@ export default function PlanForm({ onSubmit, submitting }) {
             Nets carried
             <input
               type="number"
+              placeholder="Default: 1"
               value={advanced.nets_carried}
               onChange={(e) => updateAdvanced('nets_carried', e.target.value)}
             />
           </label>
 
           <label className="field">
-            Removal method filter
+            Restrict to removal method
             <select
               value={advanced.removal_method_filter}
               onChange={(e) => updateAdvanced('removal_method_filter', e.target.value)}
             >
               {REMOVAL_METHOD_FILTER_OPTIONS.map((opt) => (
                 <option key={opt} value={opt}>
-                  {opt || '(none)'}
+                  {opt === '' ? 'No restriction (all methods)' : opt}
                 </option>
               ))}
             </select>
           </label>
 
           <label className="field">
-            Target NORAD ID
+            Force include NORAD ID
             <input
               type="text"
+              placeholder="e.g. 22675"
               value={advanced.target_norad_id}
               onChange={(e) => updateAdvanced('target_norad_id', e.target.value)}
             />
           </label>
 
           <label className="field">
-            Start RAAN (deg)
+            Starting RAAN (deg, optional)
             <input
               type="number"
               step="any"
@@ -276,18 +292,18 @@ export default function PlanForm({ onSubmit, submitting }) {
           </label>
 
           <label className="field">
-            Weights (raw JSON)
+            Risk weights (JSON)
             <textarea
               value={advanced.weights_json}
               onChange={(e) => updateAdvanced('weights_json', e.target.value)}
-              placeholder='{"risk": 0.7, "fuel": 0.3}'
+              placeholder='e.g. {"proximity": 0.5, "lifetime": 0.3, "size": 0.2}'
             />
           </label>
         </fieldset>
       )}
 
       <button type="submit" className="btn btn-primary" disabled={submitting}>
-        {submitting ? 'Generating…' : 'Generate Plan'}
+        {submitting ? 'Generating plan…' : 'Generate plan'}
       </button>
     </form>
   )

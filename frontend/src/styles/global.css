@@ -741,3 +741,72 @@ h1, h2, h3 {
 .debris-modal-status--error {
   color: var(--c-ink);
 }
+
+/* ---------------------------------------------------------------------
+   Status strip — one-line mission state summary below the header
+   --------------------------------------------------------------------- */
+.status-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 20px;
+  border-bottom: 1px solid var(--c-line);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+  min-height: 30px;
+}
+
+.status-strip--stale {
+  color: var(--c-ink);
+}
+
+.status-strip-sep {
+  color: var(--c-line);
+  margin: 0 2px;
+}
+
+/* ---------------------------------------------------------------------
+   Error panel — dismissible banner with ✕ button
+   --------------------------------------------------------------------- */
+.error-panel {
+  position: relative;
+  padding-right: 36px; /* room for the dismiss button */
+}
+
+.error-panel-dismiss {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: transparent;
+  border: none;
+  color: var(--c-steel);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+}
+.error-panel-dismiss:hover {
+  color: var(--c-ink);
+}
+
+/* ---------------------------------------------------------------------
+   Working-sticky section micro-labels
+   --------------------------------------------------------------------- */
+.working-sticky-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--c-steel);
+}
+
+/* ---------------------------------------------------------------------
+   History entry — error status variant
+   --------------------------------------------------------------------- */
+.history-status--error {
+  color: var(--c-ink);
+}

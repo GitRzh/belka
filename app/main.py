@@ -67,13 +67,29 @@ def _data_quality(epoch_age_days: float) -> str:
 # any specific object or live orbital state, so it never needs invalidation.
 _REMOVAL_METHOD_EXPLANATION_CACHE: dict[str, tuple[str, str]] = {}
 
+# M3: in-memory cache for the default scored + enriched field (no custom weights).
+# Keyed by the TLE cache file's mtime string so it auto-invalidates whenever
+# get_debris_field() writes a fresh fetch.  Custom-weights calls (from /plan or
+# /replan with non-default weights) bypass this cache because their output
+# depends on the caller-supplied weights dict and must not cross-contaminate.
+_scored_field_cache: dict[str, list] = {}  # {"<mtime>": [enriched_objects]}
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Orbital-Clean API")
 
+# H3: read allowed origins from env var so deployed environments work without
+# code changes.  Comma-separated list, e.g.:
+#   ALLOWED_ORIGINS=https://my-app.example.com,http://localhost:5173
+_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -102,7 +118,26 @@ def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, f
     threshold is batch-relative (median among fragments in whatever's
     passed in); computing it per-pool instead would make the threshold
     drift with pool_size/weights and disagree across endpoints for the
-    same object."""
+    same object.
+
+    M3: when called with default weights (weights=None, the common case for
+    /debris-field, /debris/{id}, and the first /plan of a session), the result
+    is cached in _scored_field_cache keyed by the TLE file's mtime.  Custom-
+    weights calls bypass the cache so scoring is always fresh for those."""
+    # M3: serve from in-memory cache when using default weights and no forced refresh
+    cache_key: str = ""
+    use_cache = (weights is None and not force_refresh)
+    if use_cache:
+        try:
+            import app.tle_fetch as _tf
+            if os.path.exists(_tf.CACHE_FILE):
+                cache_key = str(os.path.getmtime(_tf.CACHE_FILE))
+                if cache_key in _scored_field_cache:
+                    logger.debug("[_get_scored_field] cache hit for mtime=%s", cache_key)
+                    return _scored_field_cache[cache_key]
+        except Exception:
+            pass  # cache miss is always safe — fall through to the real pipeline
+
     raw = get_debris_field(force_refresh=force_refresh)
     scored = score_debris_field(raw, weights=weights or DEFAULT_WEIGHTS)
     enriched = add_removal_methods(scored)
@@ -119,6 +154,12 @@ def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, f
         )
         obj["removal_method_explanation"] = explanation
         obj["removal_method_explanation_source"] = source
+
+    # M3: populate cache only for default-weights results
+    if use_cache and cache_key:
+        _scored_field_cache.clear()   # one entry only — old mtime is stale
+        _scored_field_cache[cache_key] = enriched
+
     return enriched
 
 
@@ -360,6 +401,8 @@ def _build_parse_prompt(req: "PlanRequest") -> str:
         f"  risk_penalty_scale = {req.risk_penalty_scale}  (also called: risk penalty, risk weight, risk aggressiveness)\n"
         f"  weights.proximity  = {base_weights.get('proximity', DEFAULT_WEIGHTS['proximity'])}  (also called: proximity weight, congestion weight)\n"
         f"  weights.lifetime   = {base_weights.get('lifetime',  DEFAULT_WEIGHTS['lifetime'])}  (also called: lifetime weight, drag weight)\n"
+        f"  weights.size       = {base_weights.get('size',      DEFAULT_WEIGHTS['size'])}  (also called: size weight, object size weight)\n"
+        f"  inclination_deg    = {req.inclination_deg!r}  (orbital inclination override in degrees; only relevant when using a launch site)\n"
         f"  removal_method_filter = {req.removal_method_filter!r}  (also called: capture method, hardware type; "
         f"valid values are {sorted(_VALID_REMOVAL_METHOD_FILTERS)} or null for no filter/mixed methods)\n"
         f"  launch_site = {current_site!r}  (the spacecraft's launch site; "
@@ -369,8 +412,9 @@ def _build_parse_prompt(req: "PlanRequest") -> str:
         "The only keys you may emit are:\n"
         "  fuel_budget_km_s   -- positive float (km/s)\n"
         "  risk_penalty_scale -- non-negative float\n"
-        "  weights            -- object with keys 'proximity' (float 0-1) and/or 'lifetime' (float 0-1)\n"
+        "  weights            -- object with keys 'proximity' (float 0-1) and/or 'lifetime' (float 0-1) and/or 'size' (float 0-1)\n"
         f"  removal_method_filter -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}, or null to clear an existing filter\n"
+        f"  inclination_deg -- float in degrees, only if the user clearly requests an inclination change\n"
         f"  launch_site -- one of {site_keys} if the user clearly names a different launch site; "
         "omit entirely if the user does not mention a site change\n"
         "\n"
@@ -444,7 +488,7 @@ def _explain_removal_method(
 
     try:
         resp = _groq_client().chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="llama3-70b-8192",  # H2: was "openai/gpt-oss-120b" (not a valid Groq model)
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
         )
@@ -452,7 +496,8 @@ def _explain_removal_method(
         if not text:
             raise ValueError("empty response from LLM")
         result: tuple[str, str] = (text, "llm")
-    except (groq_module.APIConnectionError, groq_module.RateLimitError) as exc:
+    except (groq_module.APIConnectionError, groq_module.RateLimitError,
+            groq_module.BadRequestError, groq_module.NotFoundError) as exc:
         logger.warning(
             "[_explain_removal_method] Groq error for %r, using fallback: %s",
             removal_method, exc,
@@ -471,7 +516,7 @@ def _explain_removal_method(
 
 
 def _parse_overrides(user_text: str, req: "PlanRequest") -> dict[str, Any]:
-    """Call openai/gpt-oss-20b in json_object mode to extract parameter overrides.
+    """Call llama3-8b-8192 in json_object mode to extract parameter overrides.
     Retries once on malformed JSON, then raises ValueError."""
     client = _groq_client()
     system_prompt = _build_parse_prompt(req)
@@ -479,7 +524,7 @@ def _parse_overrides(user_text: str, req: "PlanRequest") -> dict[str, Any]:
     for attempt in range(2):
         try:
             resp = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
+                model="llama3-8b-8192",  # H2: was "openai/gpt-oss-20b" (not a valid Groq model)
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_text},
@@ -497,19 +542,22 @@ def _parse_overrides(user_text: str, req: "PlanRequest") -> dict[str, Any]:
                     f"LLM returned malformed JSON after retry. Raw response: {last_raw!r}"
                 )
             # first attempt failed -- retry once
-        except (groq_module.APIConnectionError, groq_module.RateLimitError) as exc:
+        except (groq_module.APIConnectionError, groq_module.RateLimitError,
+                groq_module.BadRequestError, groq_module.NotFoundError) as exc:
             # APIConnectionError is the base of APITimeoutError — catches both
             # a clean timeout and cases where the connection is refused/reset
             # before the timeout fires (e.g. absurdly low timeout values).
+            # BadRequestError / NotFoundError: invalid model name or API key issue
+            # — raise 503 so the caller gets a clear error rather than a crash.
             raise HTTPException(
                 status_code=503,
-                detail=f"Groq API unavailable (timeout or connection error): {exc}",
+                detail=f"Groq API unavailable: {exc}",
             ) from exc
     return {}  # unreachable; satisfies type-checker
 
 
 def _explain_diff(diff: dict[str, Any]) -> str:
-    """Call openai/gpt-oss-120b with ONLY the diff dict to generate a
+    """Call llama3-70b-8192 with ONLY the diff dict to generate a
     2-3 sentence plain-language explanation. Raw route data is never passed."""
     prompt = (
         "You are a mission-briefing assistant for an orbital debris removal programme. "
@@ -530,7 +578,7 @@ def _explain_diff(diff: dict[str, Any]) -> str:
     for attempt in range(2):
         try:
             resp = _groq_client().chat.completions.create(
-                model="openai/gpt-oss-120b",
+                model="llama3-70b-8192",  # H2: was "openai/gpt-oss-120b" (not a valid Groq model)
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
             )
@@ -541,16 +589,17 @@ def _explain_diff(diff: dict[str, Any]) -> str:
                 raise ValueError(
                     f"Explanation LLM returned malformed response after retry. Raw: {last_raw!r}"
                 )
-        except (groq_module.APIConnectionError, groq_module.RateLimitError) as exc:
+        except (groq_module.APIConnectionError, groq_module.RateLimitError,
+                groq_module.BadRequestError, groq_module.NotFoundError) as exc:
             raise HTTPException(
                 status_code=503,
-                detail=f"Groq API unavailable (timeout or connection error): {exc}",
+                detail=f"Groq API unavailable: {exc}",
             ) from exc
     return ""  # unreachable
 
 
 def _explain_plan(route_result: dict[str, Any]) -> Optional[str]:
-    """Call openai/gpt-oss-120b with route_details (+ skip context) to
+    """Call llama3-70b-8192 with route_details (+ skip context) to
     generate a 2-3 sentence plain-language mission briefing. Soft-fails:
     on any LLM error, returns None instead of raising, so /plan always
     returns the route even if narration is unavailable. Retries once
@@ -587,7 +636,7 @@ def _explain_plan(route_result: dict[str, Any]) -> Optional[str]:
     for attempt in range(2):
         try:
             resp = _groq_client().chat.completions.create(
-                model="openai/gpt-oss-120b",
+                model="llama3-70b-8192",  # H2: was "openai/gpt-oss-120b" (not a valid Groq model)
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
             )
@@ -597,9 +646,10 @@ def _explain_plan(route_result: dict[str, Any]) -> Optional[str]:
             # Do not retry -- retrying into a live rate limit just digs deeper.
             logger.warning("[_explain_plan] rate limited, not retrying: %s", exc)
             return None
-        except groq_module.APIConnectionError as exc:
+        except (groq_module.APIConnectionError,
+                groq_module.BadRequestError, groq_module.NotFoundError) as exc:
             if attempt == 1:
-                logger.warning("[_explain_plan] connection error after retry: %s", exc)
+                logger.warning("[_explain_plan] Groq error after retry: %s", exc)
                 return None
             time.sleep(1.5)  # brief backoff before the single retry, not an immediate re-hit
     return None  # unreachable; satisfies type-checker
@@ -710,19 +760,23 @@ def replan(req: ReplanRequest):
         w_raw = parsed["weights"]
         has_p = "proximity" in w_raw
         has_l = "lifetime"  in w_raw
+        has_s = "size"      in w_raw
+        # C2: always resolve all three weights — previously only proximity+lifetime
+        # were handled, leaving size at its DEFAULT value, which made the three
+        # weights sum to 1.25 (0.45+0.30+0.25+0.25) and corrupted risk scoring.
         p = float(w_raw["proximity"]) if has_p else float(base_weights.get("proximity", DEFAULT_WEIGHTS["proximity"]))
         l = float(w_raw["lifetime"])  if has_l else float(base_weights.get("lifetime",  DEFAULT_WEIGHTS["lifetime"]))
-        if not (0.0 <= p <= 1.0) or not (0.0 <= l <= 1.0):
+        s = float(w_raw["size"])      if has_s else float(base_weights.get("size",      DEFAULT_WEIGHTS["size"]))
+        if not (0.0 <= p <= 1.0) or not (0.0 <= l <= 1.0) or not (0.0 <= s <= 1.0):
             raise HTTPException(status_code=422, detail="Weight values must be in [0, 1]")
-        total = p + l
+        total = p + l + s
         if abs(total - 1.0) > 1e-6:
-            if has_p and not has_l:
-                l = 1.0 - p    # honour the explicit value exactly, derive the other
-            elif has_l and not has_p:
-                p = 1.0 - l
+            if total > 0:
+                p, l, s = p / total, l / total, s / total  # normalize all three to sum=1
             else:
-                p, l = p / total, l / total  # both given but don't sum to 1 → normalize
-        overrides["weights"] = {"proximity": round(p, 6), "lifetime": round(l, 6)}
+                # all-zero edge case: reset to defaults
+                p, l, s = DEFAULT_WEIGHTS["proximity"], DEFAULT_WEIGHTS["lifetime"], DEFAULT_WEIGHTS["size"]
+        overrides["weights"] = {"proximity": round(p, 6), "lifetime": round(l, 6), "size": round(s, 6)}
 
     if "removal_method_filter" in parsed:
         v = parsed["removal_method_filter"]
@@ -926,8 +980,10 @@ def naive_route(
             break
         fuel_used += hop_cost
         steps.append({
-            "from": nodes[current]["name"],
-            "to": nodes[next_idx]["name"],
+            # H4: use _label() so the manifest shows "NAME (norad_id)" format,
+            # matching the AI route manifest and enabling globe polyline resolution.
+            "from": _label(nodes[current]),
+            "to":   _label(nodes[next_idx]),
             "delta_v_km_s": round(hop_cost, 4),
             "arrival_time_days": round(elapsed_days, 4),
             # naive_route does not model RAAN drift -- the greedy walk uses static

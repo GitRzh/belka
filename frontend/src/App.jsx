@@ -5,6 +5,7 @@ import ReasoningPanel from './components/ReasoningPanel.jsx'
 import ReplanInput from './components/ReplanInput.jsx'
 import MissionClock from './components/MissionClock.jsx'
 import DebrisInfoModal from './components/DebrisInfoModal.jsx'
+import StatusStrip from './components/StatusStrip.jsx'
 import { api } from './api.js'
 
 export default function App() {
@@ -37,12 +38,23 @@ export default function App() {
       .catch((err) => setDebrisFieldError(err.message))
   }, [])
 
+  // M2: clear active plan immediately when the user changes any form input so
+  // the globe never shows a stale route from a different set of parameters.
+  function handleFormChange() {
+    setPlan(null)
+    setNaivePlan(null)
+    setRouteMode('ai')
+  }
+
+  const MAX_HISTORY = 20  // L2: cap history so it never grows unbounded
+
   async function handleGeneratePlan(payload) {
     setPlanning(true)
     setFormError(null)
     setNaivePlan(null) // invalidate cached naive route when plan inputs change
     const id = crypto.randomUUID()
-    setHistory(h => [...h, { id, kind: 'plan', status: 'running', params: payload, result: null, error: null }])
+    // L2: slice to last MAX_HISTORY entries so memory stays bounded
+    setHistory(h => [...h, { id, kind: 'plan', status: 'running', params: payload, result: null, error: null }].slice(-MAX_HISTORY))
     setExpandedIds(s => new Set([...s, id]))
     try {
       const result = await api.plan(payload)
@@ -67,7 +79,8 @@ export default function App() {
     setFormError(null)
     const replanParams = { ...lastPlanRequest, user_request_text: userRequestText }
     const id = crypto.randomUUID()
-    setHistory(h => [...h, { id, kind: 'replan', status: 'running', params: replanParams, result: null, error: null }])
+    // L2: same cap as handleGeneratePlan
+    setHistory(h => [...h, { id, kind: 'replan', status: 'running', params: replanParams, result: null, error: null }].slice(-MAX_HISTORY))
     setExpandedIds(s => new Set([...s, id]))
     try {
       const result = await api.replan(replanParams)
@@ -174,14 +187,32 @@ export default function App() {
         </div>
       </header>
 
+      <StatusStrip
+        routeMode={routeMode}
+        focusMode={focusMode}
+        activePlan={activePlan}
+        cacheMetadata={cacheMetadata}
+      />
+
       <div className="app-body">
         <aside className="mission-column">
           <section className="panel reticle">
             <h2 className="panel-title">Mission parameters</h2>
-            <PlanForm onSubmit={handleGeneratePlan} submitting={planning} />
+            <PlanForm onSubmit={handleGeneratePlan} onChange={handleFormChange} submitting={planning} />
           </section>
 
-          {formError && <div className="panel error-panel" role="alert">{formError}</div>}
+          {formError && (
+            <div className="panel error-panel" role="alert">
+              <button
+                className="error-panel-dismiss"
+                onClick={() => setFormError(null)}
+                aria-label="Dismiss error"
+              >
+                ✕
+              </button>
+              {formError}
+            </div>
+          )}
 
           <section className="panel reticle">
             <ReplanInput onReplan={handleReplan} submitting={replanning} disabled={!plan} />
@@ -214,20 +245,26 @@ export default function App() {
         <aside className="working-column">
           {plan && (
             <div className="working-sticky">
+              <div className="working-sticky-label">Routing strategy</div>
               <button className="btn btn-toggle" onClick={handleToggleNaive} style={{ width: '100%' }}>
-                {routeMode === 'ai' ? 'Show naive route' : 'Show AI route'}
+                {routeMode === 'ai' ? 'Switch to nearest-neighbour route' : 'Switch to AI-optimised route'}
               </button>
+              <div className="working-sticky-label" style={{ marginTop: 6 }}>Visualisation mode</div>
               <div style={{ display: 'flex', gap: 6 }}>
-                {['all', 'dim', 'focus'].map((mode) => (
+                {[
+                  { id: 'all',   label: 'Show all debris' },
+                  { id: 'dim',   label: 'Highlight route' },
+                  { id: 'focus', label: 'Route only' },
+                ].map(({ id, label }) => (
                   <button
-                    key={mode}
-                    className={`btn btn-toggle${focusMode === mode ? ' btn-primary' : ''}`}
-                    onClick={() => setFocusMode(mode)}
+                    key={id}
+                    className={`btn btn-toggle${focusMode === id ? ' btn-primary' : ''}`}
+                    onClick={() => setFocusMode(id)}
                     disabled={focusButtonsDisabled}
-                    title={focusButtonsDisabled ? 'Generate a plan with visited stops first' : undefined}
+                    title={focusButtonsDisabled ? 'Generate a plan first to enable this control' : undefined}
                     style={{ flex: 1 }}
                   >
-                    {mode === 'all' ? 'All dots' : mode === 'dim' ? 'Dim others' : 'Focus route'}
+                    {label}
                   </button>
                 ))}
               </div>
@@ -240,7 +277,7 @@ export default function App() {
           {activePlan && (
             <div className="panel reticle">
               <h2 className="panel-title" style={{ marginBottom: 4 }}>
-                {routeMode === 'naive' ? 'Naive route (active)' : 'AI route (active)'}
+                {routeMode === 'naive' ? 'Nearest-neighbour route — active' : 'AI-optimised route — active'}
               </h2>
               <ReasoningPanel
                 plan={activePlan}
@@ -258,13 +295,14 @@ export default function App() {
             // One-line summary always shown below the header, even when collapsed.
             let summary = null
             if (entry.status === 'done' && entry.kind === 'plan') {
-              summary = `${entry.result.visited_count}/${entry.result.pool_size_used} visited · ${entry.result.total_fuel_cost_km_s}/${entry.result.fuel_budget_km_s} km/s`
+              const pct = Math.round(((entry.result.fuel_used_fraction) ?? 0) * 100)
+              summary = `${entry.result.visited_count} of ${entry.result.pool_size_used} targets · ${entry.result.total_fuel_cost_km_s}/${entry.result.fuel_budget_km_s} km/s (${pct}%)`
             } else if (entry.status === 'done' && entry.kind === 'replan') {
               const raw = entry.result.explanation ?? ''
-              summary = raw.length > 80 ? raw.slice(0, 79) + '…' : raw
+              summary = raw.length > 90 ? raw.slice(0, 89) + '…' : raw
             } else if (entry.status === 'error') {
-              const raw = entry.error ?? ''
-              summary = raw.length > 80 ? raw.slice(0, 79) + '…' : raw
+              // Show the full backend error — never truncate, it contains the fix hint.
+              summary = entry.error ?? 'Unknown error'
             }
             return (
               <div key={entry.id} className="panel reticle history-entry">
@@ -276,10 +314,10 @@ export default function App() {
                 >
                   <span className="history-entry-label">
                     <span className="history-chevron">{isExpanded ? '▾' : '▸'}</span>
-                    <span className="history-kind">{entry.kind === 'plan' ? 'Plan' : 'Replan'}</span>
+                    <span className="history-kind">{entry.kind === 'plan' ? 'Plan' : 'Modification'}</span>
                   </span>
-                  <span className="history-status">
-                    {entry.status === 'running' ? 'Running…' : entry.status === 'done' ? 'Done' : 'Error'}
+                  <span className={`history-status${entry.status === 'error' ? ' history-status--error' : ''}`}>
+                    {entry.status === 'running' ? 'Running…' : entry.status === 'done' ? 'Done' : 'Failed'}
                   </span>
                 </div>
                 {summary && <p className="history-summary">{summary}</p>}

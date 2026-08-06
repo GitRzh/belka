@@ -7,37 +7,36 @@ export default function ReasoningPanel({ plan, explanationOverride }) {
 
   return (
     <div className="reasoning">
-      <h3>Reasoning</h3>
+      <h3>Route analysis</h3>
 
-      {plan.warning && <p className="warning" role="alert">Warning: {plan.warning}</p>}
+      {plan.warning && <p className="warning" role="alert">{plan.warning}</p>}
 
       {explanationOverride != null ? (
         <p className="explanation">{explanationOverride}</p>
       ) : plan.explanation ? (
         <p className="explanation">{plan.explanation}</p>
       ) : (
-        <p className="explanation">
-          Explanation unavailable{plan.explanation_error ? ` (${plan.explanation_error})` : ''}.
+        <p className="explanation" style={{ fontStyle: 'italic' }}>
+          Explanation unavailable{plan.explanation_error ? ` — ${plan.explanation_error}` : ''}.
         </p>
       )}
 
       <dl>
-        <dt>Visited</dt>
-        <dd>{plan.visited_count}</dd>
-        <dt>Pool size used</dt>
-        <dd>{plan.pool_size_used}</dd>
+        <dt>Targets visited</dt>
+        <dd>{plan.visited_count} of {plan.pool_size_used}</dd>
         <dt>Fuel used</dt>
         <dd>
-          {plan.total_fuel_cost_km_s} / {plan.fuel_budget_km_s} km/s (
-          {Math.round((plan.fuel_used_fraction ?? 0) * 100)}%)
+          {plan.total_fuel_cost_km_s} / {plan.fuel_budget_km_s} km/s ({Math.round((plan.fuel_used_fraction ?? 0) * 100)}%)
         </dd>
-        <dt>Total risk collected</dt>
+        <dt>Risk score collected</dt>
         <dd>{plan.total_risk_collected}</dd>
         {plan.skipped_count > 0 && (
           <>
-            <dt>Skipped</dt>
+            <dt>Skipped targets</dt>
             <dd>
-              {plan.skipped_count} ({plan.skipped_names?.join(', ')})
+              {/* M4: null guard — skipped_names may be null (not just undefined)
+                  on older cached responses; fall back to empty array before join. */}
+              {plan.skipped_count} ({(plan.skipped_names ?? []).join(', ')})
             </dd>
           </>
         )}
@@ -45,7 +44,7 @@ export default function ReasoningPanel({ plan, explanationOverride }) {
 
       {plan.step_breakdown?.length > 0 && (
         <details>
-          <summary>Step-by-step breakdown</summary>
+          <summary>Flight manifest ({plan.step_breakdown.length} legs)</summary>
           <table className="manifest-table">
             <thead>
               <tr>

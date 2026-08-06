@@ -11,10 +11,10 @@ export default function ReplanInput({ onReplan, submitting, disabled }) {
 
   return (
     <div className="replan">
-      <h3>Replan</h3>
+      <h3>Modify plan</h3>
       <form onSubmit={handleSubmit}>
         <label className="field">
-          Adjust the plan
+          Describe your change
           <input
             type="text"
             placeholder='e.g. "prioritize risk over fuel"'
@@ -24,7 +24,7 @@ export default function ReplanInput({ onReplan, submitting, disabled }) {
           />
         </label>
         <button type="submit" className="btn btn-primary" disabled={disabled || submitting}>
-          {submitting ? 'Replanning…' : 'Replan'}
+          {submitting ? 'Applying…' : 'Apply changes'}
         </button>
       </form>
     </div>
