@@ -34,7 +34,7 @@ from app.tle_fetch import get_debris_field, get_cache_timestamp, CACHE_MAX_AGE_S
 from app.launch_sites import LAUNCH_SITES, derive_start_orbit
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE, DELTA_V_SCALE
-from app.optimizer import optimize_route, RISK_PENALTY_SCALE, TRANSFER_TIME_DAYS_PER_KM_S
+from app.optimizer import optimize_route, solve_forced_route, RISK_PENALTY_SCALE, TRANSFER_TIME_DAYS_PER_KM_S
 from app.removal_method import add_removal_methods, METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE, METHOD_MONITOR_ONLY
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -241,6 +241,78 @@ class ReplanRequest(PlanRequest):
     user_request_text: str = Field(..., description="Plain-English override instructions, e.g. 'use only 1.5 km/s of fuel'")
 
 
+class MissionCostRequest(BaseModel):
+    """Request model for POST /mission-cost (Custom Selection mode).
+
+    The caller has already decided which debris to visit; this endpoint answers
+    "what does it cost to visit exactly these objects in the optimal order?"
+    No fuel_budget_km_s — the point is to *report* the required fuel, not cap
+    against one.  The start-orbit fields and validation mirror PlanRequest.
+    """
+    # --- launch-site alternative input (mutually exclusive with raw start fields) ---
+    launch_site: Optional[str] = Field(
+        None,
+        description=(
+            "Launch site key, one of: "
+            + ", ".join(sorted(LAUNCH_SITES))
+            + ". Mutually exclusive with providing start_altitude_km/"
+            "start_inclination_deg directly — supply one or the other."
+        ),
+    )
+    inclination_deg: Optional[float] = Field(
+        None,
+        description=(
+            "Desired orbital inclination (deg) when using launch_site. "
+            "Clamped to site's min_inclination if lower. "
+            "Ignored when start_inclination_deg is supplied directly."
+        ),
+    )
+    start_altitude_km: Optional[float] = Field(
+        None,
+        description="Spacecraft's current orbit altitude, km. Required unless launch_site is supplied.",
+    )
+    start_inclination_deg: Optional[float] = Field(
+        None,
+        description="Spacecraft's current orbit inclination, deg. Required unless launch_site is supplied.",
+    )
+    start_raan_deg: float = Field(
+        0.0,
+        description="Spacecraft's current orbit RAAN, deg. Defaults to 0.0 — see PlanRequest for full semantics.",
+    )
+    target_norad_ids: list[int] = Field(
+        ...,
+        min_length=1,
+        description="NORAD IDs of the debris objects the user has already chosen to visit. Every ID must exist in the current debris field and none may be monitor_only.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_launch_site(cls, data: Any) -> Any:
+        """Same launch_site resolution logic as PlanRequest."""
+        if not isinstance(data, dict):
+            return data
+
+        has_site = data.get("launch_site") is not None
+        has_alt  = data.get("start_altitude_km") is not None
+        has_incl = data.get("start_inclination_deg") is not None
+
+        if has_site and not (has_alt and has_incl):
+            orbit = derive_start_orbit(
+                data["launch_site"],
+                inclination=data.get("inclination_deg"),
+                altitude_km=data.get("start_altitude_km") or 800,
+            )
+            data["start_altitude_km"]    = orbit["altitude_km"]
+            data["start_inclination_deg"] = orbit["inclination_deg"]
+            data["start_raan_deg"]        = orbit["raan_deg"]
+        elif not has_site and not (has_alt and has_incl):
+            raise ValueError(
+                "Either launch_site or both start_altitude_km and "
+                "start_inclination_deg must be provided."
+            )
+        return data
+
+
 @app.get("/debris-field")
 def debris_field(force_refresh: bool = False):
     """Full scored, risk-ranked debris list (riskiest first), with cache metadata."""
@@ -376,6 +448,57 @@ def plan(req: PlanRequest):
             "Mission briefing generation failed or was rate-limited. "
             "Route data above is valid; retry to get a narrated briefing."
         )
+    return result
+
+
+@app.post("/mission-cost")
+def mission_cost(req: MissionCostRequest):
+    """Custom Selection mode: forced-visit TSP over a user-specified debris set.
+
+    Every ID in target_norad_ids *must* be visited -- the solver finds the
+    optimal visit order and reports the total fuel cost.  Unlike /plan, there
+    is no fuel budget cap: the answer is the fuel required, not whether it
+    fits within a budget.
+
+    Validation mirrors /plan's target_norad_id checks: 404 if an ID isn't in
+    the current debris field, 422 if it's classified monitor_only.
+    """
+    scored = _get_scored_field()
+    if not scored:
+        raise HTTPException(status_code=502, detail="Debris field empty -- Celestrak fetch may have failed")
+
+    targets: list[dict[str, Any]] = []
+    for norad_id in req.target_norad_ids:
+        obj = next((o for o in scored if o["norad_id"] == norad_id), None)
+        if obj is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"norad_id {norad_id} not found in current debris field",
+            )
+        if obj.get("removal_method") == METHOD_MONITOR_ONLY:
+            raise HTTPException(
+                status_code=422,
+                detail=f"norad_id {norad_id} is classified monitor_only -- not a viable route target.",
+            )
+        targets.append(obj)
+
+    result = solve_forced_route(
+        targets,
+        start_altitude_km=req.start_altitude_km,
+        start_inclination_deg=req.start_inclination_deg,
+        start_raan_deg=req.start_raan_deg,
+    )
+
+    if "error" in result:
+        raise HTTPException(status_code=422, detail=result["error"])
+
+    result["depot"] = {
+        "altitude_km": req.start_altitude_km,
+        "inclination_deg": req.start_inclination_deg,
+        "raan_deg": req.start_raan_deg,
+        "latitude": 0.0,
+        "longitude": 0.0,
+    }
     return result
 
 

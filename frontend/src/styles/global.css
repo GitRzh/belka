@@ -456,6 +456,19 @@ h1, h2, h3 {
   gap: 6px;
 }
 
+.history-entry-number {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--c-void);
+  background: var(--c-ink);
+  border-radius: var(--radius);
+  padding: 1px 5px;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+
 .history-kind {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -896,6 +909,178 @@ h1, h2, h3 {
 }
 
 /* ---------------------------------------------------------------------
+   Custom Selection — filter drop-up (opens upward from the filter button)
+   --------------------------------------------------------------------- */
+
+/* The anchor wrapper is in normal flow inside the summary card.
+   The drop-up panel uses position:absolute with bottom:100% to open upward. */
+/* .cs-filter-anchor formerly wrapped the drop-up inside the summary card.
+   Filter now lives in the banner (position:relative set inline). Rule kept
+   in case it's needed elsewhere but layout overrides are removed. */
+
+.cs-filter-dropup {
+  position: absolute;
+  bottom: calc(100% + 6px); /* opens upward, 6px gap above the banner */
+  /* Center on the banner regardless of banner width.
+     min-width ensures controls are never cramped. */
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 360px;
+  z-index: 30;
+  background: var(--c-panel);
+  border: 1px solid var(--c-steel);
+  padding: 14px 16px 12px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.cs-filter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.cs-filter-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--c-steel);
+}
+
+.cs-filter-section {
+  margin-bottom: 10px;
+}
+
+.cs-filter-section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--c-steel);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.cs-filter-hint {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 9px;
+  color: var(--c-steel);
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* Risk slider row: slider takes all remaining space, number input is compact */
+.cs-filter-risk-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cs-filter-slider {
+  flex: 1;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 3px;
+  background: var(--c-line);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+.cs-filter-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--c-ink);
+  border: 1px solid var(--c-steel);
+  cursor: pointer;
+}
+.cs-filter-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--c-ink);
+  border: 1px solid var(--c-steel);
+  cursor: pointer;
+}
+
+.cs-filter-risk-num {
+  width: 54px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--c-panel-raised);
+  border: 1px solid var(--c-line);
+  color: var(--c-ink);
+  padding: 3px 6px;
+  text-align: right;
+  border-radius: var(--radius);
+}
+.cs-filter-risk-num:focus {
+  outline: 1px solid var(--c-signal);
+  outline-offset: 1px;
+}
+
+/* Removal method checkboxes */
+.cs-filter-methods {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cs-filter-method-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--c-ink);
+  cursor: pointer;
+  font-family: var(--font-body);
+}
+.cs-filter-method-item input[type="checkbox"] {
+  accent-color: var(--c-signal);
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Reset button spans full width of drop-up */
+.cs-filter-reset {
+  width: 100%;
+  font-size: 11px;
+  color: var(--c-steel);
+  margin-top: 4px;
+}
+.cs-filter-reset:not(:disabled):hover {
+  color: var(--c-ink);
+  border-color: var(--c-steel);
+}
+.cs-filter-reset:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+/* Filter trigger button — sits in normal flow inside the anchor */
+.cs-filter-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--c-steel);
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+.cs-filter-btn:hover {
+  color: var(--c-ink);
+  border-color: var(--c-steel);
+}
+.cs-filter-btn--active {
+  color: var(--c-ink);
+  border-color: var(--c-steel);
+}
+
+/* ---------------------------------------------------------------------
    Custom selection summary card — overlays the globe (bottom-right)
    --------------------------------------------------------------------- */
 .custom-selection-summary {
@@ -903,7 +1088,9 @@ h1, h2, h3 {
   bottom: 20px;
   right: 20px;
   z-index: 20;
-  width: 300px;
+  width: 320px;
+  max-height: 85vh;
+  overflow-y: auto;
   background: var(--c-panel);
   border: 1px solid var(--c-line);
 }
@@ -967,4 +1154,296 @@ h1, h2, h3 {
   margin-top: 4px;
   padding-top: 10px;
   border-top: 1px solid var(--c-line);
+}
+
+/* ---------------------------------------------------------------------
+   Custom Selection — per-item remove button
+   --------------------------------------------------------------------- */
+.custom-selection-remove {
+  font-size: 10px;
+  padding: 2px 5px;
+  color: var(--c-steel);
+  border-color: transparent;
+  margin-left: 6px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.custom-selection-remove:hover:not(:disabled) {
+  color: var(--c-ink);
+  border-color: var(--c-line);
+}
+
+/* ---------------------------------------------------------------------
+   Custom Selection — inline start-position form
+   --------------------------------------------------------------------- */
+.mc-start-form {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--c-line);
+}
+
+.mc-start-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--c-steel);
+  margin-bottom: 6px;
+}
+
+.mc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-steel);
+  margin-bottom: 8px;
+}
+
+.mc-field input,
+.mc-field select {
+  background: var(--c-panel-raised);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  color: var(--c-ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 6px 8px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.mc-field input:focus,
+.mc-field select:focus {
+  border-color: var(--c-steel);
+  outline: none;
+}
+
+/* ---------------------------------------------------------------------
+   Custom Selection — mission cost result inside summary card
+   --------------------------------------------------------------------- */
+.mc-result {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--c-line);
+}
+
+/* Warning: safety-relevant, visually prominent (border, not just color) */
+.mc-warning {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border: 1px solid var(--c-ink);
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.mc-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-ink);
+  border: 1px solid var(--c-ink);
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  margin-top: 8px;
+}
+
+.mc-stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  margin: 0 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.mc-stats dt {
+  color: var(--c-steel);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mc-stats dd {
+  margin: 0;
+  color: var(--c-ink);
+  text-align: right;
+}
+
+.mc-details {
+  margin-top: 8px;
+  border-top: 1px solid var(--c-line);
+  padding-top: 6px;
+}
+
+.mc-details summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--c-steel);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mc-route-list {
+  margin: 6px 0 0;
+  padding: 0 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mc-route-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  padding: 2px 0;
+}
+
+.mc-route-name {
+  font-family: var(--font-body);
+  color: var(--c-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+  margin-right: 6px;
+}
+
+.mc-route-method {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--c-steel);
+  flex-shrink: 0;
+}
+
+/* ---------------------------------------------------------------------
+   Replan draft card — mission_cost hint note
+   --------------------------------------------------------------------- */
+.mc-replan-hint {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--c-steel);
+  font-style: italic;
+}
+
+/* ---------------------------------------------------------------------
+   History entry — mission_cost result block
+   --------------------------------------------------------------------- */
+.mc-history-result {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--c-line);
+}
+
+.mc-overrides-applied {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  margin-bottom: 8px;
+}
+
+
+/* ---------------------------------------------------------------------
+   Debris tab bar — left-center of globe, pinned objects only
+   Shows minimized (pinned or unpinned) debris cards
+   --------------------------------------------------------------------- */
+/* Tab bar — left-center of globe, only pinned objects.
+   Self-centering: positioned at 50% top with translateY(-50%) so adding
+   tabs grows the strip symmetrically around the vertical midpoint. */
+.debris-tab-bar {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  transform: translateY(-50%);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* cap so very tall lists don't overflow the globe pane */
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.debris-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(11, 11, 12, 0.88);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: border-color 0.12s ease;
+  max-width: 240px;
+}
+.debris-tab:hover {
+  border-color: var(--c-steel);
+}
+
+/* All tabs in the bar are pinned — white border matches globe ring highlight */
+.debris-tab--pinned {
+  border-color: var(--c-steel);
+}
+.debris-tab--pinned:hover {
+  border-color: var(--c-ink);
+}
+
+/* Active tab: the debris currently shown in the modal — white outline */
+.debris-tab--active {
+  border-color: var(--c-signal) !important;
+}
+
+.debris-tab-name {
+  color: var(--c-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.debris-tab-risk {
+  color: var(--c-steel);
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+.debris-tab-close {
+  font-size: 10px;
+  padding: 1px 4px;
+  color: var(--c-steel);
+  border-color: transparent;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.debris-tab-close:hover:not(:disabled) {
+  color: var(--c-ink);
+  border-color: var(--c-line);
+}
+
+/* ---------------------------------------------------------------------
+   Clear All button — top-center of globe, visible when 2+ objects tracked
+   --------------------------------------------------------------------- */
+.debris-clear-all {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 21;
+  font-size: 11px;
+  padding: 5px 14px;
+  background: rgba(11, 11, 12, 0.88);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-color: var(--c-steel);
+}
+.debris-clear-all:hover:not(:disabled) {
+  background: var(--c-panel-raised);
+  border-color: var(--c-ink);
 }

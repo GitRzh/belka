@@ -906,3 +906,275 @@ def test_naive_route_labels_include_norad_id(monkeypatch):
         assert label_re.match(label), (
             f"skipped_names label {label!r} missing '(norad_id)' suffix"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 -- POST /mission-cost (solve_forced_route / Custom Selection)
+# --------------------------------------------------------------------------- #
+
+from app.optimizer import solve_forced_route
+from app.main import MissionCostRequest, mission_cost
+
+
+# ---------------------------------------------------------------------------
+# Synthetic fixed test set: 3 nodes with known orbital elements so the
+# expected fuel cost can be bounded / compared.  All three share the same
+# altitude band, keeping Hohmann costs small and RAAN the dominant variable.
+# ---------------------------------------------------------------------------
+
+_FIXED_TARGETS: list[dict] = [
+    {
+        "norad_id": 99001,
+        "name": "TEST DEB-A",
+        "altitude_km": 800.0,
+        "inclination_deg": 74.0,
+        "raan_deg": 0.0,
+        "risk_score": 0.6,
+        "object_type": "fragment",
+        "removal_method": "net_capture",
+        "possible_methods": ["net_capture"],
+        "method_maturity": {"net_capture": "flight_demonstrated"},
+        "removal_method_explanation": "",
+        "bstar": 0.00005,
+    },
+    {
+        "norad_id": 99002,
+        "name": "TEST DEB-B",
+        "altitude_km": 810.0,
+        "inclination_deg": 74.2,
+        "raan_deg": 5.0,
+        "risk_score": 0.5,
+        "object_type": "fragment",
+        "removal_method": "net_capture",
+        "possible_methods": ["net_capture"],
+        "method_maturity": {"net_capture": "flight_demonstrated"},
+        "removal_method_explanation": "",
+        "bstar": 0.00005,
+    },
+    {
+        "norad_id": 99003,
+        "name": "TEST INTACT-C",
+        "altitude_km": 820.0,
+        "inclination_deg": 74.5,
+        "raan_deg": 10.0,
+        "risk_score": 0.8,
+        "object_type": "intact",
+        "removal_method": "robotic_arm_or_net_capture",
+        "possible_methods": ["robotic_arm", "net_capture"],
+        "method_maturity": {"robotic_arm": "flight_demonstrated", "net_capture": "flight_demonstrated"},
+        "removal_method_explanation": "",
+        "bstar": 0.00001,
+    },
+]
+
+_FIXED_START = dict(start_altitude_km=800.0, start_inclination_deg=74.0, start_raan_deg=0.0)
+
+
+def test_forced_route_visits_every_target():
+    """All three targets must appear in the route exactly once."""
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result, f"Unexpected solver error: {result.get('error')}"
+    assert result["visited_count"] == len(_FIXED_TARGETS), (
+        f"Expected {len(_FIXED_TARGETS)} visits, got {result['visited_count']}"
+    )
+    returned_ids = {d["norad_id"] for d in result["route_details"]}
+    expected_ids = {o["norad_id"] for o in _FIXED_TARGETS}
+    assert returned_ids == expected_ids, (
+        f"route_details IDs {returned_ids} != expected {expected_ids}"
+    )
+
+
+def test_forced_route_no_duplicate_visits():
+    """Each target must appear exactly once -- no duplicate nodes."""
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result
+    ids = [d["norad_id"] for d in result["route_details"]]
+    assert len(ids) == len(set(ids)), f"Duplicate visit detected: {ids}"
+
+
+def test_forced_route_nets_carried_required_matches_net_capture_count():
+    """nets_carried_required must equal the count of net_capture targets in the
+    fixed set -- 2 of the 3 test objects have removal_method='net_capture'."""
+    expected_net_count = sum(
+        1 for o in _FIXED_TARGETS if o["removal_method"] == "net_capture"
+    )
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result
+    assert result["nets_carried_required"] == expected_net_count, (
+        f"nets_carried_required={result['nets_carried_required']} but {expected_net_count} "
+        "net_capture targets are in the fixed test set"
+    )
+
+
+def test_forced_route_warning_present_when_nets_gt_1():
+    """A selection with > 1 net_capture target must carry a 'warning' key."""
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result
+    assert result["nets_carried_required"] > 1, "Pre-condition: fixed set needs > 1 net_capture"
+    assert "warning" in result, "Expected warning about multi-net requirement, got none"
+    assert "RemoveDEBRIS" in result["warning"]
+
+
+def test_forced_route_no_warning_when_nets_eq_1():
+    """A single net_capture target must not emit a warning."""
+    single_net = [_FIXED_TARGETS[0]]  # exactly one net_capture
+    result = solve_forced_route(single_net, **_FIXED_START)
+    assert "error" not in result
+    assert result["nets_carried_required"] == 1
+    assert "warning" not in result, f"Unexpected warning: {result.get('warning')}"
+
+
+def test_forced_route_fuel_cost_is_positive_and_finite():
+    """total_fuel_cost_km_s must be > 0 for any multi-node selection."""
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result
+    assert result["total_fuel_cost_km_s"] > 0, "Expected non-zero fuel cost for a 3-node route"
+    import math
+    assert math.isfinite(result["total_fuel_cost_km_s"]), "Fuel cost is not finite"
+
+
+def test_forced_route_step_breakdown_length_matches_visited():
+    """step_breakdown must have one entry per visited node."""
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result
+    assert len(result["step_breakdown"]) == result["visited_count"], (
+        f"step_breakdown length {len(result['step_breakdown'])} != visited_count {result['visited_count']}"
+    )
+
+
+def test_forced_route_route_details_has_removal_method():
+    """Every route_details entry must carry a removal_method string."""
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result
+    for detail in result["route_details"]:
+        assert "removal_method" in detail
+        assert isinstance(detail["removal_method"], str)
+
+
+def test_forced_route_fuel_cost_plausible_range():
+    """For objects in the same 800-820 km band with RAAN within 10 deg,
+    total 3-stop fuel cost should be < 5.0 km/s (a loose sanity bound)."""
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result
+    assert result["total_fuel_cost_km_s"] < 5.0, (
+        f"Fuel cost {result['total_fuel_cost_km_s']} km/s looks implausibly high for nearby targets"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# /mission-cost endpoint tests (via direct function calls, mocking the field)
+# --------------------------------------------------------------------------- #
+
+def test_mission_cost_monitor_only_rejected(monkeypatch):
+    """A monitor_only ID in target_norad_ids must raise HTTP 422 before the
+    solver is ever called -- same gate as /plan's target_norad_id check."""
+    monitor_obj = {
+        "norad_id": 55555,
+        "name": "MONITOR ONLY OBJ",
+        "altitude_km": 800.0,
+        "inclination_deg": 74.0,
+        "raan_deg": 0.0,
+        "risk_score": 0.1,
+        "removal_method": "monitor_only",
+        "bstar": 0.001,
+    }
+    monkeypatch.setattr(
+        "app.main._get_scored_field",
+        lambda **kw: [monitor_obj] + _FIXED_TARGETS,
+    )
+    req = MissionCostRequest(
+        **_FIXED_START,
+        target_norad_ids=[55555],
+    )
+    import pytest as _pytest
+    with _pytest.raises(Exception) as exc_info:
+        mission_cost(req)
+    # FastAPI raises HTTPException; check status code and message
+    assert exc_info.value.status_code == 422
+    assert "monitor_only" in exc_info.value.detail
+
+
+def test_mission_cost_unknown_id_rejected(monkeypatch):
+    """An ID not in the current debris field must raise HTTP 404."""
+    monkeypatch.setattr(
+        "app.main._get_scored_field",
+        lambda **kw: _FIXED_TARGETS,
+    )
+    req = MissionCostRequest(
+        **_FIXED_START,
+        target_norad_ids=[99999],  # not in _FIXED_TARGETS
+    )
+    import pytest as _pytest
+    with _pytest.raises(Exception) as exc_info:
+        mission_cost(req)
+    assert exc_info.value.status_code == 404
+    assert "99999" in exc_info.value.detail
+
+
+def test_mission_cost_returns_expected_shape(monkeypatch):
+    """Happy path: all valid IDs -> response has the required keys."""
+    monkeypatch.setattr(
+        "app.main._get_scored_field",
+        lambda **kw: _FIXED_TARGETS,
+    )
+    req = MissionCostRequest(
+        **_FIXED_START,
+        target_norad_ids=[o["norad_id"] for o in _FIXED_TARGETS],
+    )
+    result = mission_cost(req)
+    required_keys = {
+        "route", "route_details", "visited_count",
+        "total_fuel_cost_km_s", "nets_carried_required", "depot",
+    }
+    missing = required_keys - result.keys()
+    assert not missing, f"Response missing keys: {missing}"
+
+
+def test_mission_cost_all_targets_in_route(monkeypatch):
+    """Every requested ID must appear in route_details exactly once."""
+    monkeypatch.setattr(
+        "app.main._get_scored_field",
+        lambda **kw: _FIXED_TARGETS,
+    )
+    req = MissionCostRequest(
+        **_FIXED_START,
+        target_norad_ids=[o["norad_id"] for o in _FIXED_TARGETS],
+    )
+    result = mission_cost(req)
+    returned_ids = {d["norad_id"] for d in result["route_details"]}
+    expected_ids = {o["norad_id"] for o in _FIXED_TARGETS}
+    assert returned_ids == expected_ids
+
+
+def test_mission_cost_nets_carried_required_correct(monkeypatch):
+    """nets_carried_required must match net_capture count in selection."""
+    monkeypatch.setattr(
+        "app.main._get_scored_field",
+        lambda **kw: _FIXED_TARGETS,
+    )
+    expected_net_count = sum(
+        1 for o in _FIXED_TARGETS if o["removal_method"] == "net_capture"
+    )
+    req = MissionCostRequest(
+        **_FIXED_START,
+        target_norad_ids=[o["norad_id"] for o in _FIXED_TARGETS],
+    )
+    result = mission_cost(req)
+    assert result["nets_carried_required"] == expected_net_count
+
+
+def test_mission_cost_depot_echoed(monkeypatch):
+    """Response must echo the depot orbit back so the frontend can draw the
+    first leg (same contract as /plan)."""
+    monkeypatch.setattr(
+        "app.main._get_scored_field",
+        lambda **kw: _FIXED_TARGETS,
+    )
+    req = MissionCostRequest(
+        **_FIXED_START,
+        target_norad_ids=[_FIXED_TARGETS[0]["norad_id"]],
+    )
+    result = mission_cost(req)
+    assert "depot" in result
+    assert result["depot"]["altitude_km"] == _FIXED_START["start_altitude_km"]
+    assert result["depot"]["inclination_deg"] == _FIXED_START["start_inclination_deg"]

@@ -67,4 +67,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  missionCost: (payload) =>
+    request('/mission-cost', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 }

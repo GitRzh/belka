@@ -310,6 +310,184 @@ def optimize_route(
     }
 
 
+def solve_forced_route(
+    targets: list[dict[str, Any]],
+    start_altitude_km: float,
+    start_inclination_deg: float,
+    start_raan_deg: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Forced-visit TSP: every object in `targets` MUST be visited.
+
+    Semantics differ from optimize_route() deliberately:
+    - No pool, no pool_size, no AddDisjunction — every supplied node is
+      mandatory.
+    - No fuel-budget dimension — the purpose is to compute the required fuel,
+      not gate against a budget the caller may not have set.
+    - Net-capacity dimension cap is set dynamically to the count of
+      net_capture targets in `targets`, guaranteeing feasibility regardless
+      of how many nets the user's selection requires.
+    - Minimises total route delta-v (same scaled cost matrix as the
+      orienteering solver, same OR-Tools machinery).
+
+    Returns a dict shaped to mirror optimize_route()'s output for the fields
+    that exist in this context, plus:
+        nets_carried_required  int   — net_capture targets in the selection.
+        warning                str   — present only when nets_carried_required > 1,
+                                       noting it exceeds RemoveDEBRIS's single-net
+                                       flight history (informational, not a rejection).
+    """
+    if not targets:
+        return {"error": "No targets supplied to solve_forced_route -- list must be non-empty."}
+
+    depot = _build_depot_node(start_altitude_km, start_inclination_deg, start_raan_deg)
+
+    # Node layout: [0] depot | [1..n] targets | [n+1] virtual zero-cost end
+    nodes = [depot] + targets
+    n_targets = len(targets)
+    end_index = n_targets + 1
+
+    matrix = build_cost_matrix(nodes)
+    scaled = scale_matrix_for_ortools(matrix)
+
+    full_size = n_targets + 2
+    full_matrix: list[list[int]] = [row + [0] for row in scaled]
+    full_matrix.append([0] * full_size)
+
+    manager = pywrapcp.RoutingIndexManager(full_size, 1, [0], [end_index])
+    routing = pywrapcp.RoutingModel(manager)
+
+    def distance_callback(from_index: int, to_index: int) -> int:
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return full_matrix[from_node][to_node]
+
+    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+
+    # Net-capacity dimension: cap = number of net_capture nodes in the forced
+    # set.  This is the minimum feasible cap; anything lower would make the
+    # problem infeasible (all nodes are mandatory, so the cap must accommodate
+    # exactly the nets actually required by this selection).
+    nets_carried_required = sum(
+        1 for obj in targets if obj.get("removal_method") == METHOD_NET_CAPTURE
+    )
+    net_cap = max(nets_carried_required, 1)  # cap >= 1 keeps the dimension valid
+
+    def net_capacity_callback(from_index: int) -> int:
+        from_node = manager.IndexToNode(from_index)
+        if 1 <= from_node <= n_targets and targets[from_node - 1].get("removal_method") == METHOD_NET_CAPTURE:
+            return 1
+        return 0
+
+    net_capacity_callback_index = routing.RegisterUnaryTransitCallback(net_capacity_callback)
+    routing.AddDimension(net_capacity_callback_index, 0, net_cap, True, "NetCapacity")
+
+    # NOTE: no AddDisjunction — every target node is mandatory.
+
+    search_params = pywrapcp.DefaultRoutingSearchParameters()
+    search_params.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    )
+    search_params.local_search_metaheuristic = (
+        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    )
+    search_params.time_limit.FromSeconds(SOLVER_TIME_LIMIT_SECONDS)
+
+    solution = routing.SolveWithParameters(search_params)
+
+    if solution is None:
+        return {"error": "No feasible solution found for the forced-visit route -- this should not happen with a valid non-empty target list; check for degenerate orbital elements."}
+
+    # Walk the solved route.
+    visited_target_indices: list[int] = []
+    index = routing.Start(0)
+    while not routing.IsEnd(index):
+        node = manager.IndexToNode(index)
+        if 1 <= node <= n_targets:
+            visited_target_indices.append(node - 1)
+        index = solution.Value(routing.NextVar(index))
+
+    def _label(obj: dict[str, Any]) -> str:
+        if obj["norad_id"] == -1:
+            return obj["name"]
+        return f"{obj['name']} ({obj['norad_id']})"
+
+    # Post-solve per-step breakdown with J2 RAAN drift correction,
+    # same logic as optimize_route().
+    step_breakdown: list[dict[str, Any]] = []
+    arrival_time_per_target_i: dict[int, float] = {}
+    total_fuel = 0.0
+    elapsed_days = 0.0
+    prev_node_index = 0
+
+    for target_i in visited_target_indices:
+        node_index = target_i + 1
+        from_node = nodes[prev_node_index]
+        to_node = nodes[node_index]
+
+        fetch_time_raan = to_node.get("raan_deg", 0.0)
+        drift = raan_drift_deg(to_node["altitude_km"], to_node.get("inclination_deg", 0.0), elapsed_days)
+        projected_raan = fetch_time_raan + drift
+
+        drifted_cost = transfer_delta_v(
+            alt1_km=from_node["altitude_km"],
+            incl1_deg=from_node.get("inclination_deg", 0.0),
+            alt2_km=to_node["altitude_km"],
+            incl2_deg=to_node.get("inclination_deg", 0.0),
+            raan1_deg=from_node.get("raan_deg", 0.0),
+            raan2_deg=projected_raan,
+        )["delta_v_total_km_s"]
+
+        step_breakdown.append({
+            "from": _label(from_node),
+            "to": _label(to_node),
+            "delta_v_km_s": round(drifted_cost, 4),
+            "arrival_time_days": round(elapsed_days, 4),
+            "raan_drift_deg": round(drift, 4),
+        })
+        total_fuel += drifted_cost
+        elapsed_days += drifted_cost * TRANSFER_TIME_DAYS_PER_KM_S
+        arrival_time_per_target_i[target_i] = elapsed_days
+        prev_node_index = node_index
+
+    visited_objects = [targets[i] for i in visited_target_indices]
+
+    route_details = [
+        {
+            "norad_id": o["norad_id"],
+            "name": o["name"],
+            "object_type": o.get("object_type", "unknown"),
+            "removal_method": o.get("removal_method", "unclassified"),
+            "possible_methods": o.get("possible_methods", []),
+            "method_maturity": o.get("method_maturity", {}),
+            "removal_method_explanation": o.get("removal_method_explanation", ""),
+            "risk_score": round(o.get("risk_score", 0.0), 4),
+            "arrival_time_days": round(arrival_time_per_target_i.get(target_i, 0.0), 4),
+        }
+        for target_i, o in zip(visited_target_indices, visited_objects)
+    ]
+
+    result: dict[str, Any] = {
+        "route": [_label(o) for o in visited_objects],
+        "route_details": route_details,
+        "visited_count": len(visited_objects),
+        "total_fuel_cost_km_s": round(total_fuel, 4),
+        "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
+        "step_breakdown": step_breakdown,
+        "nets_carried_required": nets_carried_required,
+    }
+
+    if nets_carried_required > 1:
+        result["warning"] = (
+            f"This selection requires {nets_carried_required} net captures. "
+            "RemoveDEBRIS — the only flown precedent for net-capture ADR — carried exactly one net. "
+            "A mission visiting all selected targets would require hardware beyond current flight-demonstrated capability."
+        )
+
+    return result
+
+
 if __name__ == "__main__":
     import random
 

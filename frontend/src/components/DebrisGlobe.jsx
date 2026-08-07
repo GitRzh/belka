@@ -116,10 +116,17 @@ export default function DebrisGlobe({
   routeStyle = 'solid',
   cacheMetadata,
   focusMode = 'dim',
-  selectedDebrisId = null,
-  isModalPinned = false,
+  activeDebrisId = null,
+  pinnedIds = null,        // Set<noradId> of pinned (but not minimized) objects
   customSelecting = false,
   customSelectedIds = null,
+  // customFilterConfig: { minRisk: number, methods: string[] } | null
+  // Applied as visual dimming inside custom selection mode.
+  // null = no filter active. An object passes when:
+  //   - risk_score >= minRisk  (minRisk 0 = no risk gate)
+  //   - methods is empty OR removal_method is in methods  (AND logic)
+  // Dimmed objects remain fully clickable/selectable — this is visual only.
+  customFilterConfig = null,
   onDebrisSelect,
   onDebrisToggleSelect,
   onBackgroundClick,
@@ -247,8 +254,7 @@ export default function DebrisGlobe({
           focusMode !== 'focus' || !visitedIds || visitedIds.has(debris.norad_id)
         )
         .map((debris) => {
-          const isVisited    = visitedIds && visitedIds.has(debris.norad_id)
-          const isNonVisited = visitedIds && !visitedIds.has(debris.norad_id)
+          const isVisited = visitedIds && visitedIds.has(debris.norad_id)
 
           // --- Debris-selection dimming (takes priority over route focus mode) ---
           // When a debris is selected: selected dot = full brightness, boosted size;
@@ -257,30 +263,54 @@ export default function DebrisGlobe({
           let color
           let pixelSize = isVisited ? riskSize(debris.risk_score) + 2 : riskSize(debris.risk_score)
 
+          const isPinned  = pinnedIds?.has(debris.norad_id) ?? false
+          const isActive  = debris.norad_id === activeDebrisId
+
           if (customSelecting && customSelectedIds) {
-            // Custom selection mode: all debris stay full opacity; only selected
-            // ones get a distinct cyan highlight. No dimming of unselected dots —
-            // the user needs to keep seeing the full field to pick more targets.
-            color = customSelectedIds.has(debris.norad_id)
-              ? Color.fromCssColorString('#00e5ff').withAlpha(0.95)
-              : riskColor(debris.risk_score)   // full opacity, unchanged
-            if (customSelectedIds.has(debris.norad_id)) {
-              pixelSize = riskSize(debris.risk_score) + 6
+            // Custom selection mode: selected dots get cyan highlight + size boost.
+            // Unselected dots dim only when a filter is actively set (minRisk > 0 or
+            // methods selected). No filter → full opacity for all.
+            const isSelected = customSelectedIds.has(debris.norad_id)
+            const filterActive =
+              customFilterConfig &&
+              (customFilterConfig.minRisk > 0 || customFilterConfig.methods.length > 0)
+
+            let passesFilter = true
+            if (filterActive) {
+              // AND logic: must satisfy both risk and method axes
+              const riskOk = debris.risk_score >= customFilterConfig.minRisk
+              const methodOk =
+                customFilterConfig.methods.length === 0 ||
+                customFilterConfig.methods.includes(debris.removal_method)
+              passesFilter = riskOk && methodOk
             }
-          } else if (selectedDebrisId !== null) {
-            if (debris.norad_id === selectedDebrisId) {
-              // Selected entity: full brightness + slight size boost
+
+            if (isSelected) {
+              color = Color.fromCssColorString('#00e5ff').withAlpha(0.95)
+              pixelSize = riskSize(debris.risk_score) + 6
+            } else if (filterActive && !passesFilter) {
+              color = riskColor(debris.risk_score).withAlpha(0.3)
+            } else {
+              color = riskColor(debris.risk_score)
+            }
+          } else if (activeDebrisId !== null || (pinnedIds && pinnedIds.size > 0)) {
+            if (isActive) {
+              // Active entity: full brightness + size boost
               color = riskColor(debris.risk_score)
               pixelSize = riskSize(debris.risk_score) + 4
+            } else if (isPinned) {
+              // Pinned entity: full brightness, slightly larger (globe highlight persists)
+              color = riskColor(debris.risk_score)
+              pixelSize = riskSize(debris.risk_score) + 2
             } else {
-              // All other entities: dimmed so the selected one stands out
+              // All other entities: dimmed
               color = riskColor(debris.risk_score).withAlpha(0.15)
             }
           } else {
-            // No selection active — use existing focusMode behaviour
-            color = (focusMode === 'all' || !isNonVisited)
-              ? riskColor(debris.risk_score)
-              : riskColor(debris.risk_score).withAlpha(0.3)
+            // No active debris selection and not in custom-select mode.
+            // focusMode controls visibility (focus=hide non-route) but NOT opacity —
+            // all rendered dots stay at full opacity regardless of all/dim/focus mode.
+            color = riskColor(debris.risk_score)
           }
 
           return (
@@ -288,6 +318,10 @@ export default function DebrisGlobe({
               <PointGraphics
                 pixelSize={pixelSize}
                 color={color}
+                // Pinned objects: white outline ring so they visually stand out
+                // from the active dot even when both are full-brightness risk color.
+                outlineColor={isPinned ? Color.WHITE : undefined}
+                outlineWidth={isPinned ? 2 : 0}
               />
             </Entity>
           )

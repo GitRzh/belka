@@ -110,3 +110,36 @@ Systematic audit of all frontend + backend files found 14 bugs (2 critical, 5 hi
 - **L3:** Data freshness label shows age in minutes ("data 45 min old") instead of misleading "data current". `StatusStrip.jsx:19–29`
 
 **Files changed:** 5 (app/main.py, PlanForm.jsx, App.jsx, ReasoningPanel.jsx, StatusStrip.jsx)  
+
+## POST /mission-cost (Custom Selection backend — Modules B, C)
+
+**Built with IBM Bob** — verified via
+pytest + curl before merge.
+
+- **B:** `solve_forced_route()` — forced-visit TSP variant, kept separate
+  from `optimize_route()`'s orienteering solver (no `AddDisjunction`, every
+  target mandatory; no fuel-budget dimension — reports cost, doesn't cap
+  against one). Net-capacity dimension cap computed dynamically per request
+  (count of `net_capture` targets in the selection), returned as
+  `nets_carried_required`; `warning` field added when >1 (exceeds
+  RemoveDEBRIS's single-net flight precedent — informational, not blocking).
+  Net-capacity match confirmed consistent with `optimize_route()`'s existing
+  strict `removal_method == "net_capture"` logic — `robotic_arm_or_net_capture`
+  objects correctly excluded from the count on both paths, not a new bug.
+- **C:** New `MissionCostRequest` model (reuses `PlanRequest`'s start-position
+  validator) + `POST /mission-cost`. Validation reuses `/plan`'s per-ID
+  lookup pattern (404 unknown ID, 422 `monitor_only`).
+- **Response shape:** mirrors `/plan`'s (`route`, `route_details`,
+  `step_breakdown`, `total_fuel_cost_km_s`) plus `nets_carried_required`
+  and optional `warning`.
+- **Bugs fixed:** 0 (shipped clean).
+- **Testing:** +15 tests (9 `solve_forced_route` unit tests, 6 `/mission-cost`
+  endpoint tests). Suite: 86 → 101 total, 95 passing. 6 failures are
+  pre-existing (LLM explanation cache, Groq fallback, `/replan` filter-clear,
+  parse-override retry) — confirmed unrelated by diff scope (this change
+  only touched `optimizer.py` additions + `main.py` additions, none of the
+  failing tests exercise either).
+- **Verification:** real curl against a 3-node mixed selection
+  (`robotic_arm_or_net_capture` + 2× `net_capture`) confirmed route order,
+  `nets_carried_required: 2`, `warning` text, and `depot` echo — not
+  verified against the endpoint spec alone.
