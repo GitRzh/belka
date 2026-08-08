@@ -584,16 +584,18 @@ export default function App() {
             </button>
           )}
 
-          {/* Custom selection banner — shown while globe-picking */}
+          {/* Custom selection toolbar — shown while globe-picking.
+              FilterDropup rendered as a separate sibling so the banner keeps
+              its own position:absolute from CSS (not overridden inline). */}
+          {customSelecting && customFilterOpen && (
+            <FilterDropup
+              filter={customFilterConfig}
+              onChange={setCustomFilterConfig}
+              onClose={() => setCustomFilterOpen(false)}
+            />
+          )}
           {customSelecting && (
-            <div className="custom-selection-banner" style={{ position: 'relative' }}>
-              {customFilterOpen && (
-                <FilterDropup
-                  filter={customFilterConfig}
-                  onChange={setCustomFilterConfig}
-                  onClose={() => setCustomFilterOpen(false)}
-                />
-              )}
+            <div className="custom-selection-banner">
               <span className="custom-selection-count">{customSelectedIds.size} selected</span>
               <button
                 className={`btn cs-filter-btn${
@@ -942,6 +944,16 @@ export default function App() {
                               <div className="mc-warning" role="alert">
                                 {entry.result.warning}
                               </div>
+                            )}
+                            {entry.result.explanation && (
+                              <p className="explanation" style={{ marginBottom: 8 }}>
+                                {entry.result.explanation}
+                              </p>
+                            )}
+                            {entry.result.explanation_error && (
+                              <p style={{ marginBottom: 8, color: 'var(--color-muted, #57606a)', fontSize: 12 }}>
+                                {entry.result.explanation_error}
+                              </p>
                             )}
                             <dl className="mc-stats">
                               <dt>Targets</dt>

@@ -1,25 +1,25 @@
 """
 Module B, step 3: the optimizer.
 
-Wires the N x N delta-v matrix (cost_matrix.py) into OR-Tools as an
-orienteering problem (prize-collecting TSP), NOT a forced-visit TSP: the
-solver gets a fuel budget and *chooses* which subset of the candidate pool
-to visit and in what order, to maximize total risk-value removed within
-that budget. A plain TSP would be blind to medium-risk debris that happens
-to sit conveniently along the route -- orienteering isn't.
+Wires the N x N delta-v matrix (cost_matrix.py) into OR-Tools as a
+budget-constrained coverage problem: the solver picks which subset of
+the candidate pool to visit, and in what fuel-optimal order, subject only
+to the total delta-v budget.  Risk score is NOT part of the solver objective
+-- it only drives post-solve ordering.
 
-Modeled as an open (one-way) routing problem: real depot at the servicing
-spacecraft's current orbit, plus a zero-cost virtual "mission complete" end
-node every real node connects to for free. That end node is what lets the
-route terminate wherever's cheapest instead of forcing a return-to-depot
-burn nobody asked for. AddDisjunction makes every debris node optional at a
-per-node penalty = risk_score * RISK_PENALTY_SCALE -- skip a node and you
-forfeit that penalty from the objective, so the solver only skips when the
-marginal fuel cost of visiting genuinely exceeds the node's risk value.
-
-RISK_PENALTY_SCALE is a tuning knob, same spirit as risk_score.py's
-DEFAULT_WEIGHTS: meant to be overridden later by the /replan LLM parser
-(e.g. "prioritize riskiest debris even if it costs more fuel" -> raise it).
+Design:
+  - Cost model: pure fuel (delta-v, km/s scaled to integer units).  The
+    solver minimises total transit cost.  AddDisjunction penalty = budget_scaled
+    (the entire fuel budget), so skipping a node notionally "costs" as much as
+    the whole budget, making visits always preferred when the arc fits in the
+    remaining fuel.  The solver therefore visits as many nodes as budget allows
+    in the fuel-cheapest order.
+  - Post-solve ordering: the visited set is re-sorted by risk_score DESC after
+    the solve so the highest-risk debris is addressed first.  This reflects real
+    mission planning: "visit as many dangerous objects as fuel allows; address
+    the worst ones first."
+  - Modelled as an open (one-way) trip: zero-cost virtual end node lets the
+    route stop wherever's cheapest without a return-to-depot burn.
 """
 from typing import Any
 
@@ -36,8 +36,6 @@ except ImportError:
 
 DEFAULT_NETS_CARRIED = 1  # RemoveDEBRIS's actual flight history: exactly one net carried.
 
-RISK_PENALTY_SCALE = 3000.0  # risk_score in [0,1] -> penalty in scaled cost units
-                              # (units match cost_matrix.DELTA_V_SCALE: 1 unit = 1 m/s)
 SOLVER_TIME_LIMIT_SECONDS = 5
 
 # Heuristic: days of elapsed mission time per km/s of delta-v spent.
@@ -77,13 +75,17 @@ def optimize_route(
     start_altitude_km: float,
     start_inclination_deg: float,
     start_raan_deg: float = 0.0,
-    risk_penalty_scale: float = RISK_PENALTY_SCALE,
     nets_carried: int = DEFAULT_NETS_CARRIED,
 ) -> dict[str, Any]:
     """
-    Solve the orienteering problem over `pool` (the ~30-50 candidate objects
-    from cost_matrix.select_candidate_pool()), starting from the spacecraft's
-    current orbit, subject to a total delta-v budget.
+    Solve the fuel-optimal coverage problem over `pool` (the ~30-50 candidate
+    objects from cost_matrix.select_candidate_pool()), starting from the
+    spacecraft's current orbit, subject to a total delta-v budget.
+
+    The solver minimises total fuel cost (pure delta-v) and visits as many nodes
+    as the budget allows.  Risk score plays no role in the solver objective;
+    instead, the visited set is sorted by risk_score DESC after the solve so the
+    highest-risk debris is addressed first.
 
     start_raan_deg: the spacecraft's current RAAN. Defaults to 0.0 if the
     caller doesn't know it, which falls back to the pre-RAAN
@@ -96,8 +98,9 @@ def optimize_route(
     flown precedent) carried exactly one net. Default 1 reflects that;
     callers can raise it for an explicit exploratory/hypothetical run.
 
-    Returns route order, visited vs skipped candidates, total fuel cost,
-    per-step cost breakdown, and how much of the budget got used.
+    Returns route order (risk-sorted DESC), visited vs skipped candidates,
+    total fuel cost, per-step cost breakdown, and how much of the budget
+    got used.
     """
     depot = _build_depot_node(start_altitude_km, start_inclination_deg, start_raan_deg)
 
@@ -146,12 +149,14 @@ def optimize_route(
     net_capacity_callback_index = routing.RegisterUnaryTransitCallback(net_capacity_callback)
     routing.AddDimension(net_capacity_callback_index, 0, nets_carried, True, "NetCapacity")
 
-    # Every pool node (indices 1..n_pool) is optional at a risk-proportional penalty.
-    for i, obj in enumerate(pool):
+    # Every pool node is optional.  Penalty = budget_scaled (the full fuel
+    # budget): skipping a node notionally "costs" the whole budget, so the
+    # solver always prefers visiting over skipping when the arc fits in the
+    # remaining fuel.  Risk score does not appear here -- the solver decides
+    # WHICH nodes fit; post-solve sorting by risk_score decides visit ORDER.
+    for i in range(n_pool):
         node_index = i + 1
-        risk = obj.get("risk_score", 0.0)
-        penalty = round(risk * risk_penalty_scale)
-        routing.AddDisjunction([manager.NodeToIndex(node_index)], penalty)
+        routing.AddDisjunction([manager.NodeToIndex(node_index)], budget_scaled)
 
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = (
@@ -168,20 +173,26 @@ def optimize_route(
         return {"error": "No feasible solution found -- fuel budget may be too tight to reach even one node."}
 
     # Walk the solved route, extracting visited nodes (skip depot/virtual end).
-    visited_pool_indices: list[int] = []
+    solver_order_indices: list[int] = []
     index = routing.Start(0)
     while not routing.IsEnd(index):
         node = manager.IndexToNode(index)
         if 1 <= node <= n_pool:
-            visited_pool_indices.append(node - 1)  # back to pool[] indexing
+            solver_order_indices.append(node - 1)  # back to pool[] indexing
         index = solution.Value(routing.NextVar(index))
 
+    # Post-solve: re-sort the visited set by risk_score DESC so the highest-risk
+    # debris is addressed first.  The solver chose which nodes fit in the budget;
+    # this re-sequences them for mission prioritisation without changing the set.
+    # Index-based identity (not name-based) handles fragments that share the same
+    # "name" field but differ only by norad_id.
+    visited_pool_indices = sorted(
+        solver_order_indices,
+        key=lambda i: pool[i].get("risk_score", 0.0),
+        reverse=True,
+    )
+
     visited_objects = [pool[i] for i in visited_pool_indices]
-    # NOTE: was previously computed via name-set difference, which silently
-    # mis-reported skipped objects whenever two pool objects shared a "name"
-    # (common in real data -- many debris fragments are all named e.g.
-    # "COSMOS 2251 DEB", disambiguated only by norad_id). Index-based
-    # difference is the correct identity check.
     visited_index_set = set(visited_pool_indices)
     skipped_objects = [obj for i, obj in enumerate(pool) if i not in visited_index_set]
 
@@ -299,14 +310,6 @@ def optimize_route(
         "step_breakdown": step_breakdown,
         "net_capacity_constrained": nets_carried,
         "min_depot_hop_km_s": round(min(matrix[0][1:]), 4) if len(pool) > 0 else 0.0,
-        "min_risk_penalty_scale_needed": round(
-            min(
-                matrix[0][j + 1] * DELTA_V_SCALE / obj.get("risk_score", 1e-9)
-                for j, obj in enumerate(pool)
-                if obj.get("risk_score", 0) > 0
-            ),
-            1,
-        ) if any(obj.get("risk_score", 0) > 0 for obj in pool) else 0.0,
     }
 
 
@@ -397,7 +400,12 @@ def solve_forced_route(
     solution = routing.SolveWithParameters(search_params)
 
     if solution is None:
-        return {"error": "No feasible solution found for the forced-visit route -- this should not happen with a valid non-empty target list; check for degenerate orbital elements."}
+        return {"error": (
+            "Solver could not find a feasible route for the selected targets. "
+            "This can happen when orbital elements are degenerate (e.g. zero altitude) or "
+            "when a very large selection produces a time-limit timeout. "
+            "Try reducing the number of selected targets, or verify that all targets have valid TLE data."
+        )}
 
     # Walk the solved route.
     visited_target_indices: list[int] = []

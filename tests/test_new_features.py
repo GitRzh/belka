@@ -847,9 +847,6 @@ def test_naive_route_zero_visit_produces_warning(monkeypatch):
     assert "min_depot_hop_km_s" in result, (
         "min_depot_hop_km_s missing when visited_count==0"
     )
-    assert "min_risk_penalty_scale_needed" in result, (
-        "min_risk_penalty_scale_needed missing when visited_count==0"
-    )
     # Confirm the hop value in the warning message matches the field value.
     hop = result["min_depot_hop_km_s"]
     assert str(hop) in result["warning"], (
@@ -1178,3 +1175,125 @@ def test_mission_cost_depot_echoed(monkeypatch):
     assert "depot" in result
     assert result["depot"]["altitude_km"] == _FIXED_START["start_altitude_km"]
     assert result["depot"]["inclination_deg"] == _FIXED_START["start_inclination_deg"]
+
+
+# ---------------------------------------------------------------------------
+# Pure-fuel optimizer: route ordered by risk_score DESC
+# ---------------------------------------------------------------------------
+
+# Synthetic pool with known, clearly distinct risk scores so the ordering
+# assertion can't be satisfied by accident.  All three share the same altitude
+# band (near-zero Hohmann cost) so the solver visits all three within even a
+# modest fuel budget.  raan_deg values are identical so RAAN doesn't inflate
+# any leg beyond what Hohmann accounts for.
+_RISK_SORT_POOL: list[dict] = [
+    {
+        "norad_id": 77001,
+        "name": "LOW-RISK DEB",
+        "altitude_km": 800.0,
+        "inclination_deg": 74.0,
+        "raan_deg": 0.0,
+        "risk_score": 0.30,
+        "removal_method": "net_capture",
+        "object_type": "debris",
+        "possible_methods": [],
+        "method_maturity": {},
+        "removal_method_explanation": "",
+    },
+    {
+        "norad_id": 77002,
+        "name": "HIGH-RISK DEB",
+        "altitude_km": 800.5,
+        "inclination_deg": 74.01,
+        "raan_deg": 0.0,
+        "risk_score": 0.90,
+        "removal_method": "net_capture",
+        "object_type": "debris",
+        "possible_methods": [],
+        "method_maturity": {},
+        "removal_method_explanation": "",
+    },
+    {
+        "norad_id": 77003,
+        "name": "MID-RISK DEB",
+        "altitude_km": 800.2,
+        "inclination_deg": 74.005,
+        "raan_deg": 0.0,
+        "risk_score": 0.60,
+        "removal_method": "net_capture",
+        "object_type": "debris",
+        "possible_methods": [],
+        "method_maturity": {},
+        "removal_method_explanation": "",
+    },
+]
+
+_RISK_SORT_START = dict(start_altitude_km=800.0, start_inclination_deg=74.0, start_raan_deg=0.0)
+
+
+def test_route_ordered_by_risk_score_desc():
+    """optimize_route() must return visited nodes sorted by risk_score DESC.
+    The solver selects nodes based on fuel cost alone; post-solve sorting
+    re-sequences them so highest-risk debris is addressed first.
+
+    nets_carried=3 so the net_capture cap (default 1) doesn't limit the visit
+    count below 3 -- all three synthetic nodes use removal_method='net_capture'.
+    """
+    from app.optimizer import optimize_route
+
+    # 200 km/s is far more than enough to reach all 3 near-identical orbits.
+    result = optimize_route(
+        _RISK_SORT_POOL,
+        fuel_budget_km_s=200.0,
+        nets_carried=3,
+        **_RISK_SORT_START,
+    )
+
+    assert "error" not in result, f"Unexpected solver error: {result.get('error')}"
+    assert result["visited_count"] == 3, (
+        f"Expected 3 visits, got {result['visited_count']}. "
+        "All 3 nodes are within the same orbital shell; solver should visit all of them."
+    )
+
+    scores = [d["risk_score"] for d in result["route_details"]]
+    assert scores == sorted(scores, reverse=True), (
+        f"route_details not sorted by risk_score DESC: {scores}"
+    )
+
+    # Explicit check: first entry must be the highest-risk node
+    assert result["route_details"][0]["norad_id"] == 77002, (
+        f"Expected HIGH-RISK DEB (77002) first, got norad_id={result['route_details'][0]['norad_id']}"
+    )
+    # Last entry must be the lowest-risk node
+    assert result["route_details"][-1]["norad_id"] == 77001, (
+        f"Expected LOW-RISK DEB (77001) last, got norad_id={result['route_details'][-1]['norad_id']}"
+    )
+
+    # Fuel cost must be the real solver output — positive and within budget
+    assert result["total_fuel_cost_km_s"] > 0
+    assert result["total_fuel_cost_km_s"] < 200.0
+
+
+def test_route_ordered_by_risk_score_desc_empty_route():
+    """Edge case: zero-visit route returns empty lists without error.
+
+    Uses a depot far from the pool nodes (depot at 74 deg incl, nodes at 98 deg)
+    so even 0.001 km/s budget can't cover the minimum cross-inclination hop.
+    """
+    from app.optimizer import optimize_route
+
+    cross_incl_pool = [
+        {**node, "inclination_deg": 98.0, "raan_deg": 180.0}
+        for node in _RISK_SORT_POOL
+    ]
+    # Depot stays at 74 deg incl; cross-inclination hop costs ~3-4 km/s minimum.
+    result = optimize_route(
+        cross_incl_pool,
+        fuel_budget_km_s=0.001,
+        **_RISK_SORT_START,
+    )
+
+    assert "error" not in result, f"Unexpected error: {result.get('error')}"
+    assert result["visited_count"] == 0
+    assert result["route_details"] == []
+    assert result["route"] == []

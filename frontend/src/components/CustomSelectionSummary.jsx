@@ -114,6 +114,16 @@ function MissionCostResult({ result }) {
           {result.warning}
         </div>
       )}
+      {result.explanation && (
+        <p className="explanation" style={{ marginBottom: 8 }}>
+          {result.explanation}
+        </p>
+      )}
+      {result.explanation_error && (
+        <p className="mc-explanation-error" style={{ marginBottom: 8, color: 'var(--color-muted, #57606a)', fontSize: 12 }}>
+          {result.explanation_error}
+        </p>
+      )}
       <dl className="mc-stats">
         <dt>Targets</dt>
         <dd>{result.visited_count}</dd>

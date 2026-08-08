@@ -256,20 +256,18 @@ export default function DebrisGlobe({
         .map((debris) => {
           const isVisited = visitedIds && visitedIds.has(debris.norad_id)
 
-          // --- Debris-selection dimming (takes priority over route focus mode) ---
-          // When a debris is selected: selected dot = full brightness, boosted size;
-          // all others = 0.15 alpha (strong dim so the selected dot pops clearly).
-          // When nothing is selected: fall back to the existing focusMode logic.
+          // Dot sizing: visited route dots get a slight boost.
           let color
           let pixelSize = isVisited ? riskSize(debris.risk_score) + 2 : riskSize(debris.risk_score)
 
-          const isPinned  = pinnedIds?.has(debris.norad_id) ?? false
-          const isActive  = debris.norad_id === activeDebrisId
+          const isPinned = pinnedIds?.has(debris.norad_id) ?? false
+          const isActive = debris.norad_id === activeDebrisId
 
           if (customSelecting && customSelectedIds) {
-            // Custom selection mode: selected dots get cyan highlight + size boost.
-            // Unselected dots dim only when a filter is actively set (minRisk > 0 or
-            // methods selected). No filter → full opacity for all.
+            // Custom selection mode.
+            // Selected dots → cyan highlight + size boost.
+            // Unselected dots → dim ONLY when a filter is actively engaged.
+            //   No filter set → every dot stays full opacity.
             const isSelected = customSelectedIds.has(debris.norad_id)
             const filterActive =
               customFilterConfig &&
@@ -277,7 +275,7 @@ export default function DebrisGlobe({
 
             let passesFilter = true
             if (filterActive) {
-              // AND logic: must satisfy both risk and method axes
+              // AND logic: object must satisfy both risk and method axes.
               const riskOk = debris.risk_score >= customFilterConfig.minRisk
               const methodOk =
                 customFilterConfig.methods.length === 0 ||
@@ -293,23 +291,16 @@ export default function DebrisGlobe({
             } else {
               color = riskColor(debris.risk_score)
             }
-          } else if (activeDebrisId !== null || (pinnedIds && pinnedIds.size > 0)) {
+          } else {
+            // Normal mode (not custom-selecting).
+            // Active/pinned dots get a size boost; opacity stays full for everything.
+            // Dimming by focusMode or selection state has been removed — opacity
+            // only changes when the custom-select filter is engaged (above).
             if (isActive) {
-              // Active entity: full brightness + size boost
-              color = riskColor(debris.risk_score)
               pixelSize = riskSize(debris.risk_score) + 4
             } else if (isPinned) {
-              // Pinned entity: full brightness, slightly larger (globe highlight persists)
-              color = riskColor(debris.risk_score)
               pixelSize = riskSize(debris.risk_score) + 2
-            } else {
-              // All other entities: dimmed
-              color = riskColor(debris.risk_score).withAlpha(0.15)
             }
-          } else {
-            // No active debris selection and not in custom-select mode.
-            // focusMode controls visibility (focus=hide non-route) but NOT opacity —
-            // all rendered dots stay at full opacity regardless of all/dim/focus mode.
             color = riskColor(debris.risk_score)
           }
 

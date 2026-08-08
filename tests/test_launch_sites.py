@@ -35,7 +35,6 @@ from app.main import (
     _build_parse_prompt,
     _parse_overrides,
 )
-from app.optimizer import RISK_PENALTY_SCALE
 from app.cost_matrix import DEFAULT_POOL_SIZE
 
 
@@ -50,7 +49,6 @@ def _make_req(**kwargs) -> PlanRequest:
         start_inclination_deg=74.0,
         fuel_budget_km_s=3.5,
         pool_size=DEFAULT_POOL_SIZE,
-        risk_penalty_scale=RISK_PENALTY_SCALE,
         weights=None,
     )
     defaults.update(kwargs)
@@ -64,7 +62,6 @@ def _make_replan_req(**kwargs) -> ReplanRequest:
         start_inclination_deg=74.0,
         fuel_budget_km_s=3.5,
         pool_size=DEFAULT_POOL_SIZE,
-        risk_penalty_scale=RISK_PENALTY_SCALE,
         weights=None,
         user_request_text="placeholder",
     )

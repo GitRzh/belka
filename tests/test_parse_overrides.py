@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 
 from app.main import _parse_overrides, PlanRequest
-from app.optimizer import RISK_PENALTY_SCALE
 from app.cost_matrix import DEFAULT_POOL_SIZE
 
 
@@ -34,7 +33,6 @@ def _make_req(**kwargs) -> PlanRequest:
         start_inclination_deg=74.0,
         fuel_budget_km_s=3.5,
         pool_size=DEFAULT_POOL_SIZE,
-        risk_penalty_scale=RISK_PENALTY_SCALE,
         weights=None,
     )
     defaults.update(kwargs)
@@ -96,20 +94,20 @@ class TestParseOverrides(unittest.TestCase):
 
     def test_first_call_valid_no_retry(self):
         """First response is valid JSON → succeeds on attempt 0, no retry."""
-        valid_json = '{"risk_penalty_scale": 9000.0, "intruder_key": "ignored"}'
+        valid_json = '{"fuel_budget_km_s": 5.0, "intruder_key": "ignored"}'
         mock_client = _mock_client_with_responses(valid_json)
 
         with patch("app.main._groq_client", return_value=mock_client):
-            result = _parse_overrides("raise the risk penalty", _make_req())
+            result = _parse_overrides("increase the fuel budget", _make_req())
 
         self.assertEqual(mock_client.chat.completions.create.call_count, 1,
                          "create() should only be called once when first response is valid")
 
         # Allowlist filter must have stripped the stray key
-        self.assertIn("risk_penalty_scale", result)
+        self.assertIn("fuel_budget_km_s", result)
         self.assertNotIn("intruder_key", result,
                          "stray keys outside _ALLOWED_OVERRIDE_KEYS must be filtered")
-        self.assertEqual(result["risk_penalty_scale"], 9000.0)
+        self.assertEqual(result["fuel_budget_km_s"], 5.0)
 
     def test_no_changes_key_passes_through_allowlist(self):
         """no_changes is in _ALLOWED_OVERRIDE_KEYS and must not be stripped."""

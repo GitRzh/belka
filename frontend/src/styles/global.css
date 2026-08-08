@@ -920,12 +920,12 @@ h1, h2, h3 {
 
 .cs-filter-dropup {
   position: absolute;
-  bottom: calc(100% + 6px); /* opens upward, 6px gap above the banner */
-  /* Center on the banner regardless of banner width.
-     min-width ensures controls are never cramped. */
+  /* Banner is bottom:20px, ~52px tall → place drop-up just above it.
+     Centered horizontally in the globe pane to match the banner center. */
+  bottom: 82px;
   left: 50%;
   transform: translateX(-50%);
-  min-width: 360px;
+  min-width: 380px;
   z-index: 30;
   background: var(--c-panel);
   border: 1px solid var(--c-steel);

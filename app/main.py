@@ -34,7 +34,7 @@ from app.tle_fetch import get_debris_field, get_cache_timestamp, CACHE_MAX_AGE_S
 from app.launch_sites import LAUNCH_SITES, derive_start_orbit
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE, DELTA_V_SCALE
-from app.optimizer import optimize_route, solve_forced_route, RISK_PENALTY_SCALE, TRANSFER_TIME_DAYS_PER_KM_S
+from app.optimizer import optimize_route, solve_forced_route, TRANSFER_TIME_DAYS_PER_KM_S
 from app.removal_method import add_removal_methods, METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE, METHOD_MONITOR_ONLY
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -195,7 +195,6 @@ class PlanRequest(BaseModel):
     start_raan_deg: float = Field(0.0, description="Spacecraft's current orbit RAAN, deg. Defaults to 0.0 if the caller doesn't know their spacecraft's current RAAN, which re-enables the pre-RAAN |incl1-incl2| approximation for depot hops only -- every debris-to-debris leg already uses real RAAN values from tle_fetch.py regardless.")
     fuel_budget_km_s: float = Field(..., gt=0, description="Total delta-v budget for the mission, km/s")
     pool_size: int = Field(DEFAULT_POOL_SIZE, gt=0, description="How many top-risk candidates the optimizer considers")
-    risk_penalty_scale: float = Field(RISK_PENALTY_SCALE, description="Tuning knob: higher = solver skips fewer risky nodes even if fuel-expensive")
     weights: Optional[dict[str, float]] = Field(None, description="Override risk_score.py DEFAULT_WEIGHTS, e.g. {'proximity': 0.8, 'lifetime': 0.2}")
     nets_carried: int = Field(1, ge=1, description="Max net_capture stops in the route. Default 1 matches RemoveDEBRIS's actual flight history (it carried exactly one net) -- raise for an explicit exploratory what-if run.")
     removal_method_filter: Optional[str] = Field(None, description=f"Restrict the route to a single removal method -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}. No real ADR mission has flown mixed capture hardware (RemoveDEBRIS = net+harpoon only, ELSA-M = magnetic docking only), so this models 'one spacecraft, one hardware type'. Unset preserves the current mixed-method behavior.")
@@ -394,7 +393,6 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
         start_altitude_km=req.start_altitude_km,
         start_inclination_deg=req.start_inclination_deg,
         start_raan_deg=req.start_raan_deg,
-        risk_penalty_scale=req.risk_penalty_scale,
         nets_carried=req.nets_carried,
     )
 
@@ -402,22 +400,16 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=result["error"])
 
     # OR-Tools can return a valid (non-None) solution that visits zero nodes
-    # when the per-skip penalty is below the cheapest arc cost -- the solver
-    # finds it optimal to skip everything and pays no fuel.  That is not an
-    # error from the solver's perspective, so "error" is never set and the
+    # when the fuel budget is too tight to reach any candidate.  That is not
+    # an error from the solver's perspective, so "error" is never set and the
     # guard above doesn't fire.  Flag it explicitly so callers always get a
     # human-readable explanation rather than a silent empty route.
     if result["visited_count"] == 0:
         min_hop = result["min_depot_hop_km_s"]
-        min_rps = result["min_risk_penalty_scale_needed"]
         result["warning"] = (
             f"No debris nodes were visited within the given constraints. "
-            f"Possible causes: fuel_budget_km_s is too tight to reach any "
-            f"candidate (cheapest depot hop on this pool is ~{min_hop} km/s), or "
-            f"risk_penalty_scale is too low relative to arc costs (needs ~{min_rps} "
-            f"or higher for the cheapest reachable node on this pool), making it "
-            f"cheaper for the solver to skip every node. Try raising "
-            f"fuel_budget_km_s or risk_penalty_scale."
+            f"The cheapest depot hop on this pool is ~{min_hop} km/s -- "
+            f"try raising fuel_budget_km_s above that value."
         )
 
     result["pool_size_used"] = len(pool)
@@ -489,6 +481,9 @@ def mission_cost(req: MissionCostRequest):
         start_raan_deg=req.start_raan_deg,
     )
 
+    # Hard solver errors (degenerate orbital elements, truly infeasible geometry)
+    # are surfaced as HTTP 422 — these indicate a bad request, not a soft planning
+    # outcome the user can act on by changing targets.
     if "error" in result:
         raise HTTPException(status_code=422, detail=result["error"])
 
@@ -499,6 +494,18 @@ def mission_cost(req: MissionCostRequest):
         "latitude": 0.0,
         "longitude": 0.0,
     }
+
+    # Fix 1: generate LLM mission briefing on valid routes, mirroring /plan.
+    # _explain_plan() returns None when route_details is empty (no stops visited),
+    # so it is always safe to call unconditionally here.
+    explanation = _explain_plan(result)
+    result["explanation"] = explanation
+    if explanation is None and result.get("visited_count", 0) > 0:
+        result["explanation_error"] = (
+            "Mission briefing generation failed or was rate-limited. "
+            "Route data above is valid; retry to get a narrated briefing."
+        )
+
     return result
 
 
@@ -509,7 +516,7 @@ def mission_cost(req: MissionCostRequest):
 # groq==0.11.0 supports response_format={"type": "json_object"} only (no
 # json_schema mode). The JSON schema is described in the system prompt instead.
 _GROQ_TIMEOUT = 20.0
-_ALLOWED_OVERRIDE_KEYS = {"fuel_budget_km_s", "risk_penalty_scale", "weights", "removal_method_filter", "no_changes", "launch_site", "inclination_deg"}
+_ALLOWED_OVERRIDE_KEYS = {"fuel_budget_km_s", "weights", "removal_method_filter", "no_changes", "launch_site", "inclination_deg"}
 
 def _build_parse_prompt(req: "PlanRequest") -> str:
     """Build the system prompt with current parameter values embedded so the
@@ -521,7 +528,6 @@ def _build_parse_prompt(req: "PlanRequest") -> str:
         "You are a parameter-extraction assistant for an orbital debris removal mission planner. "
         "The mission currently has these parameter values:\n"
         f"  fuel_budget_km_s   = {req.fuel_budget_km_s}  (also called: fuel budget, delta-v budget, fuel limit)\n"
-        f"  risk_penalty_scale = {req.risk_penalty_scale}  (also called: risk penalty, risk weight, risk aggressiveness)\n"
         f"  weights.proximity  = {base_weights.get('proximity', DEFAULT_WEIGHTS['proximity'])}  (also called: proximity weight, congestion weight)\n"
         f"  weights.lifetime   = {base_weights.get('lifetime',  DEFAULT_WEIGHTS['lifetime'])}  (also called: lifetime weight, drag weight)\n"
         f"  weights.size       = {base_weights.get('size',      DEFAULT_WEIGHTS['size'])}  (also called: size weight, object size weight)\n"
@@ -534,7 +540,6 @@ def _build_parse_prompt(req: "PlanRequest") -> str:
         "From the user's message, extract ONLY the parameters they want to change and output a single valid JSON object. "
         "The only keys you may emit are:\n"
         "  fuel_budget_km_s   -- positive float (km/s)\n"
-        "  risk_penalty_scale -- non-negative float\n"
         "  weights            -- object with keys 'proximity' (float 0-1) and/or 'lifetime' (float 0-1) and/or 'size' (float 0-1)\n"
         f"  removal_method_filter -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}, or null to clear an existing filter\n"
         f"  inclination_deg -- float in degrees, only if the user clearly requests an inclination change\n"
@@ -747,13 +752,11 @@ def replan(req: ReplanRequest):
         v = float(parsed["fuel_budget_km_s"])
         if v <= 0:
             raise HTTPException(status_code=422, detail="fuel_budget_km_s must be > 0")
-        # optimizer.py:95 converts the budget to an integer via
+        # optimizer.py converts the budget to an integer via
         # round(fuel_budget_km_s * 1000).  Any value below 0.0005 rounds to 0,
         # setting OR-Tools' Fuel dimension capacity to zero -- no arc can be
         # traversed, so the solver returns a valid non-None solution that visits
-        # nothing.  That empty route comes back as a silent 200 with no error
-        # key (same degeneration path as a sub-threshold risk_penalty_scale).
-        # 0.001 gives 2× margin above the 0.0005 rounding cliff.
+        # nothing.  0.001 gives 2× margin above the 0.0005 rounding cliff.
         if v < 0.001:
             raise HTTPException(
                 status_code=422,
@@ -764,31 +767,6 @@ def replan(req: ReplanRequest):
                 ),
             )
         overrides["fuel_budget_km_s"] = v
-
-    if "risk_penalty_scale" in parsed:
-        v = float(parsed["risk_penalty_scale"])
-        if v < 0:
-            raise HTTPException(status_code=422, detail="risk_penalty_scale must be >= 0")
-        # The degeneration threshold is pool- and start-position-dependent:
-        # with a same-inclination start, visits drop to 0 below rps~2-3; with
-        # a cross-inclination start, they collapse to near-zero below rps~50.
-        # This floor is therefore a best-effort filter, not a guarantee -- the
-        # warning field on visited_count==0 (main.py:~106) is the real safety
-        # net.  50 is chosen as the floor: it cleared the degeneration zone in
-        # all start configurations tested on the 700-1000km pool (rps=5 still
-        # gave 1 visit from a cross-inclination start; rps=50 gave 7+).
-        if v < 50:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"risk_penalty_scale must be >= 50 (got {v}). "
-                    "The degeneration threshold (where OR-Tools skips all nodes "
-                    "and returns a silent empty route) is pool- and "
-                    "start-position-dependent; 50 is the validated safe floor "
-                    "on the 700-1000km debris pool."
-                ),
-            )
-        overrides["risk_penalty_scale"] = v
 
     if "weights" in parsed:
         base_weights = req.weights or DEFAULT_WEIGHTS
@@ -1057,23 +1035,8 @@ def naive_route(
         for o in visited_objects
     ]
 
-    # Fields for the zero-visit warning (mirrors _run_plan / optimizer.py logic).
-    # Computed here using the same matrix already built above so there's no
-    # second build_cost_matrix() call.  depot_row = row 0, pool cols 1..n.
     depot_row = matrix[0][1:]  # list of raw km/s floats, one per pool node
     min_depot_hop_km_s: float = round(min(depot_row), 4) if depot_row else 0.0
-    min_risk_penalty_scale_needed: float = (
-        round(
-            min(
-                depot_row[j] * DELTA_V_SCALE / pool[j].get("risk_score", 1e-9)
-                for j in range(len(pool))
-                if pool[j].get("risk_score", 0) > 0
-            ),
-            1,
-        )
-        if any(pool[j].get("risk_score", 0) > 0 for j in range(len(pool)))
-        else 0.0
-    )
 
     skipped_objects = [nodes[i] for i in range(1, len(nodes)) if i not in set(visited_idx)]
 
@@ -1089,10 +1052,7 @@ def naive_route(
         "fuel_used_fraction": round(fuel_used / fuel_budget_km_s, 4) if fuel_budget_km_s > 0 else 0.0,
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
         "step_breakdown": steps,
-        # Shape parity with /plan: include diagnostic fields so consumers
-        # (and naive-vs-AI comparisons) can interpret zero-visit results.
         "min_depot_hop_km_s": min_depot_hop_km_s,
-        "min_risk_penalty_scale_needed": min_risk_penalty_scale_needed,
         # naive_route is always single-vehicle, no OR-Tools net cap --
         # echo 1 for shape parity rather than None (avoids consumer null checks).
         "net_capacity_constrained": 1,
@@ -1101,12 +1061,8 @@ def naive_route(
     if result["visited_count"] == 0:
         result["warning"] = (
             f"No debris nodes were visited within the given constraints. "
-            f"Possible causes: fuel_budget_km_s is too tight to reach any "
-            f"candidate (cheapest depot hop on this pool is ~{min_depot_hop_km_s} km/s), or "
-            f"risk_penalty_scale is too low relative to arc costs (needs ~{min_risk_penalty_scale_needed} "
-            f"or higher for the cheapest reachable node on this pool), making it "
-            f"cheaper for the solver to skip every node. Try raising "
-            f"fuel_budget_km_s or risk_penalty_scale."
+            f"The cheapest depot hop on this pool is ~{min_depot_hop_km_s} km/s -- "
+            f"try raising fuel_budget_km_s above that value."
         )
 
     explanation = _explain_plan(result)

@@ -143,3 +143,14 @@ pytest + curl before merge.
   (`robotic_arm_or_net_capture` + 2× `net_capture`) confirmed route order,
   `nets_carried_required: 2`, `warning` text, and `depot` echo — not
   verified against the endpoint spec alone.
+
+## Pure-fuel optimizer + risk-priority ordering
+
+**Built with IBM Bob** — root-cause diagnosis of systematic 0-visit solver failure, cost model rewrite, post-solve sort.
+
+- **B (optimizer):** Replaced the risk-weighted objective (`penalty = risk_score × RISK_PENALTY_SCALE`) with pure fuel cost. The solver now minimises total Δv and visits as many nodes as the budget allows; `AddDisjunction` penalty is set to `budget_scaled` (the full budget in integer units) so the solver always prefers visiting over skipping when an arc fits in the remaining fuel.
+- **B (optimizer):** Post-solve: visited nodes are re-sorted by `risk_score DESC` before `route_details` and `step_breakdown` are assembled — highest-risk debris is addressed first within the fuel-optimal set.
+- **B, C:** `RISK_PENALTY_SCALE` constant and `risk_penalty_scale` parameter removed from `optimize_route()`, `PlanRequest`, `/replan` prompt, and override-parser. `min_risk_penalty_scale_needed` removed from all response shapes.
+- **C:** Zero-visit warning simplified — now references only `min_depot_hop_km_s` (the only remaining actionable diagnostic).
+- **Bugs fixed (1):** Root cause of systematic 0-visit failure — default `RISK_PENALTY_SCALE = 3000` produced skip-penalties (≤ 3000 integer units) always below real depot arc costs (5 000–13 000 units for 5–13 km/s hops); solver rationally chose to skip every node. Fix is the model change above, not a constant bump.
+- **Testing:** +2 tests (`test_route_ordered_by_risk_score_desc`, `test_route_ordered_by_risk_score_desc_empty_route`). Suite: 101 → 103 total, 99 passing. 4 pre-existing failures (LLM cache, Groq fallback, replan parse-override retry) — unaffected.
