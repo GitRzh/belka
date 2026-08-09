@@ -158,10 +158,10 @@ h1, h2, h3 {
   min-height: 0;
 }
 
+/* 50/50 split: globe left, dashboard right */
 .globe-pane {
-  flex: 1;
+  flex: 1 1 50%;
   min-width: 0;
-  border-left: 1px solid var(--c-line);
   border-right: 1px solid var(--c-line);
 }
 
@@ -589,21 +589,283 @@ h1, h2, h3 {
 }
 
 /* ---------------------------------------------------------------------
-   Responsive: stack below ~860px
+   Visualization arrow — right edge of globe, vertically centered
    --------------------------------------------------------------------- */
-@media (max-width: 860px) {
+.globe-viz-arrow {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+}
+
+/* The arrow trigger button */
+.globe-viz-arrow-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  /* full-height strip look — grows with content beside it */
+  padding: 10px 0;
+  background: rgba(11, 11, 12, 0.82);
+  border: 1px solid var(--c-line);
+  border-right: none;        /* flush against the pane edge */
+  border-radius: var(--radius) 0 0 var(--radius);
+  color: var(--c-steel);
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: color 0.12s ease, border-color 0.12s ease;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+.globe-viz-arrow-btn:hover {
+  color: var(--c-ink);
+  border-color: var(--c-steel);
+}
+
+/* The slide-out options panel — sits to the left of the arrow button */
+.globe-viz-options {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 7px;
+  background: rgba(11, 11, 12, 0.82);
+  border: 1px solid var(--c-line);
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.globe-viz-options .btn {
+  font-size: 11px;
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------
+   Dashboard — right side: tab bar across the top, content pane below
+   --------------------------------------------------------------------- */
+
+/* Outer container: takes the right ~50% of app-body, flex column */
+.dashboard-column {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--c-line);
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────── */
+.dashboard-tab-bar {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--c-line);
+  background: var(--c-panel);
+  overflow: hidden;
+}
+
+/* Individual tab button — browser-tab style */
+.dashboard-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 18px;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--c-line);
+  border-radius: 0;
+  cursor: pointer;
+  font: inherit;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.dashboard-tab:hover:not(:disabled) {
+  background: transparent;
+}
+
+/* Active tab — no fill; distinguish with title color only */
+.dashboard-tab--active .dashboard-section-title {
+  color: var(--c-ink);
+}
+
+/* Disabled tab (Workspace before any plans) */
+.dashboard-tab--disabled,
+.dashboard-tab:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+/* ── Content pane ─────────────────────────────────────────────────── */
+.dashboard-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Shared title token ───────────────────────────────────────────── */
+.dashboard-section-title {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--c-steel);
+}
+
+.workspace-title--empty {
+  opacity: 0.45;
+}
+
+.workspace-close-btn {
+  font-size: 11px;
+  padding: 3px 7px;
+  color: var(--c-steel);
+}
+
+.dashboard-section-body {
+  overflow-y: auto;
+  padding: 14px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---------------------------------------------------------------------
+   History — vertical scrollable tab stack
+   --------------------------------------------------------------------- */
+.history-tab-row {
+  display: flex;
+  flex-direction: column;    /* vertical stack */
+  gap: 3px;
+  padding: 6px 8px;
+  overflow-y: auto;          /* scroll vertically when overflow */
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--c-line) transparent;
+}
+
+.history-tab-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  opacity: 0.5;
+  padding: 2px 4px;
+}
+
+.history-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  transition: border-color 0.12s ease, background 0.12s ease;
+  flex-shrink: 0;
+}
+
+.history-tab:hover {
+  border-color: var(--c-steel);
+  background: var(--c-panel-raised);
+}
+
+.history-tab--active {
+  border-color: var(--c-ink);
+  background: var(--c-panel-raised);
+}
+
+.history-tab-kind {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-steel);
+  flex-shrink: 0;
+}
+
+.history-tab-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-steel);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.history-tab-status--error {
+  color: var(--c-ink);
+}
+
+.history-tab-status--running {
+  opacity: 0.7;
+}
+
+/* ---------------------------------------------------------------------
+   Parameters form — 2-column grid layout
+   --------------------------------------------------------------------- */
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
+/* Fields that should always span both columns */
+.form-grid-span {
+  grid-column: 1 / -1;
+}
+
+/* ---------------------------------------------------------------------
+   Workspace empty state
+   --------------------------------------------------------------------- */
+.workspace-empty-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--c-steel);
+  opacity: 0.45;
+  margin: 0;
+  padding: 8px 0;
+  line-height: 1.6;
+}
+
+/* ---------------------------------------------------------------------
+   Responsive: stack below ~1024px
+   --------------------------------------------------------------------- */
+@media (max-width: 1024px) {
   .app-body {
     flex-direction: column;
   }
   .globe-pane {
     height: 45vh;
-    border-left: none;
     border-right: none;
     border-bottom: 1px solid var(--c-line);
   }
-  .mission-column,
-  .working-column {
-    width: 100%;
+  .dashboard-column {
+    flex: 1;
+    min-height: 0;
+    border-left: none;
+    border-top: 1px solid var(--c-line);
   }
 }
 
@@ -1446,4 +1708,61 @@ h1, h2, h3 {
 .debris-clear-all:hover:not(:disabled) {
   background: var(--c-panel-raised);
   border-color: var(--c-ink);
+}
+
+/* ---------------------------------------------------------------------
+   Pin buttons — small icon-only circles next to launch-site / orbit fields
+   --------------------------------------------------------------------- */
+
+/* Wrapper: select/input stretches to fill remaining space; button is fixed. */
+.field-with-pin {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.field-with-pin select,
+.field-with-pin input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Circular icon button — no label variant. */
+.pin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--c-line);
+  background: var(--c-panel-raised);
+  color: var(--c-steel);
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.15s ease, color 0.15s ease;
+  align-self: center;
+}
+.pin-btn:hover:not(:disabled) {
+  border-color: var(--c-steel);
+  color: var(--c-ink);
+}
+.pin-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Orbit pin — wider to fit the icon + text label. */
+.pin-btn--orbit {
+  width: auto;
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  gap: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--c-steel);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  height: auto;
 }

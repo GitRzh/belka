@@ -17,6 +17,7 @@ Pipeline for /plan:
 """
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -107,6 +108,90 @@ def launch_sites_catalog():
         }
         for key, site in LAUNCH_SITES.items()
     }
+
+
+class PreviewOrbitRequest(BaseModel):
+    altitude_km: float = Field(..., gt=0, description="Circular orbit altitude, km")
+    inclination_deg: float = Field(..., ge=0, le=180, description="Orbital inclination, degrees")
+    raan_deg: float = Field(0.0, ge=0, lt=360, description="Right ascension of ascending node, degrees")
+    time_iso: Optional[str] = Field(None, description="ISO-8601 UTC time for position calc; defaults to now")
+
+
+@app.post("/preview-orbit")
+def preview_orbit(req: PreviewOrbitRequest):
+    """Convert circular-orbit elements (altitude, inclination, RAAN) to a
+    ground-track latitude/longitude at the requested time (default: now).
+
+    Uses a purely analytical propagation for a circular orbit:
+      - The ascending node crosses the equator at longitude = RAAN - GMST.
+      - The satellite's true anomaly advances at the mean motion from t=0
+        (assumed at the ascending node, i.e. argument of latitude = 0 at t=0).
+      - Sub-satellite latitude/longitude are derived from the unit position vector
+        projected back through the inclination rotation.
+
+    This is a first-order approximation suitable for "where roughly is the
+    orbital plane right now" visualisation — not for precise conjunction analysis.
+    """
+    # Earth constants
+    R_EARTH_KM = 6371.0
+    MU_KM3_S2  = 398600.4418   # Earth gravitational parameter, km³/s²
+
+    # Epoch: parse or use current UTC
+    if req.time_iso:
+        try:
+            epoch = datetime.fromisoformat(req.time_iso.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"Invalid time_iso format: {req.time_iso!r}")
+    else:
+        epoch = datetime.now(timezone.utc)
+
+    # Seconds since J2000.0 (2000-01-01T12:00:00 UTC)
+    J2000 = datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t_sec = (epoch - J2000).total_seconds()
+
+    # Semi-major axis (km) and mean motion (rad/s) for circular orbit
+    a_km      = R_EARTH_KM + req.altitude_km
+    n_rad_s   = math.sqrt(MU_KM3_S2 / (a_km ** 3))
+
+    # Greenwich Mean Sidereal Time (GMST) in radians.
+    # IAU formula: θ_GMST = 280.46061837 + 360.98564736629 * T_days (degrees)
+    t_days   = t_sec / 86400.0
+    gmst_deg = (280.46061837 + 360.98564736629 * t_days) % 360.0
+    gmst_rad = math.radians(gmst_deg)
+
+    # RAAN in the inertial frame is given; the satellite starts at the ascending
+    # node (argument of latitude = 0) at t=0 and advances at mean motion.
+    raan_rad  = math.radians(req.raan_deg)
+    incl_rad  = math.radians(req.inclination_deg)
+    u_rad     = n_rad_s * t_sec  # argument of latitude at epoch (mod 2π)
+
+    # Position unit vector in ECI (perifocal -> ECI rotation):
+    # r_hat = (cos u · N̂ + sin u · P̂) where N̂ and P̂ are orbit-frame basis vectors
+    # N̂ = (cos Ω, sin Ω, 0)  — node direction
+    # P̂ = (−sin Ω·cos i, cos Ω·cos i, sin i) — 90° ahead in orbit plane
+    cos_u   = math.cos(u_rad)
+    sin_u   = math.sin(u_rad)
+    cos_O   = math.cos(raan_rad)
+    sin_O   = math.sin(raan_rad)
+    cos_i   = math.cos(incl_rad)
+    sin_i   = math.sin(incl_rad)
+
+    x_eci = cos_u * cos_O - sin_u * sin_O * cos_i
+    y_eci = cos_u * sin_O + sin_u * cos_O * cos_i
+    z_eci = sin_u * sin_i
+
+    # ECI → ECEF: rotate by -GMST around Z axis
+    cos_gmst = math.cos(gmst_rad)
+    sin_gmst = math.sin(gmst_rad)
+    x_ecef =  x_eci * cos_gmst + y_eci * sin_gmst
+    y_ecef = -x_eci * sin_gmst + y_eci * cos_gmst
+    z_ecef =  z_eci
+
+    # Latitude / longitude from ECEF unit vector
+    lat_deg = math.degrees(math.asin(max(-1.0, min(1.0, z_ecef))))
+    lon_deg = math.degrees(math.atan2(y_ecef, x_ecef))
+
+    return {"lat": round(lat_deg, 6), "lon": round(lon_deg, 6)}
 
 
 def _get_scored_field(force_refresh: bool = False, weights: Optional[dict[str, float]] = None) -> list[dict[str, Any]]:

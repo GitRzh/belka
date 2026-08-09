@@ -36,6 +36,13 @@ async function request(path, options = {}) {
 export const api = {
   getLaunchSites: () => request('/launch-sites'),
 
+  previewOrbit: (payload) =>
+    request('/preview-orbit', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+
   getDebrisField: () => request('/debris-field'),
 
   getDebrisById: (noradId) => request(`/debris/${noradId}`),

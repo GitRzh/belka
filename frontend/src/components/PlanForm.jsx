@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api } from '../api'
 
 // Field split follows CHECKPOINT.txt's "FRONTEND UX NOTES":
@@ -6,7 +6,7 @@ import { api } from '../api'
 
 const REMOVAL_METHOD_FILTER_OPTIONS = ['', 'robotic_arm_or_net_capture', 'net_capture']
 
-export default function PlanForm({ onSubmit, onChange, submitting }) {
+export default function PlanForm({ onSubmit, onChange, submitting, globeRef }) {
   // 'site' | 'raw' — which start-position mode is active
   const [startMode, setStartMode] = useState('site')
 
@@ -27,7 +27,6 @@ export default function PlanForm({ onSubmit, onChange, submitting }) {
     fuel_budget_km_s: '2.5',  // C1: sensible default so the demo shows visible budget differences
   })
 
-  const [advancedOpen, setAdvancedOpen] = useState(false)
   const [advanced, setAdvanced] = useState({
     pool_size: '',
     risk_penalty_scale: '',
@@ -38,6 +37,45 @@ export default function PlanForm({ onSubmit, onChange, submitting }) {
     // text for now since its shape isn't pinned down yet in the backend docs.
     weights_json: '',
   })
+
+  // Track whether the site-pin or orbit-pin is currently placed, so we can
+  // remove stale entities when re-pinning or when the form input changes.
+  const sitePinnedRef  = useRef(false)
+  const orbitPinnedRef = useRef(false)
+
+  // Pin the selected launch site on the globe.
+  function handlePinSite() {
+    if (!globeRef?.current) return
+    const siteKey = siteForm.launch_site
+    const siteData = siteOptions.find(([k]) => k === siteKey)
+    if (!siteData) return
+    const [, site] = siteData
+    globeRef.current.addPinEntity('launch-site-pin', site.lon, site.lat, 0, 'site')
+    globeRef.current.flyTo(site.lon, site.lat, 0)
+    sitePinnedRef.current = true
+  }
+
+  // Pin the custom orbit position on the globe (calls backend for lat/lon).
+  async function handlePinOrbit() {
+    if (!globeRef?.current) return
+    const alt  = Number(required.start_altitude_km)
+    const incl = Number(required.start_inclination_deg)
+    const raan = Number(advanced.start_raan_deg) || 0
+    if (!alt || !incl) return  // nothing to show yet
+    try {
+      const pos = await api.previewOrbit({
+        altitude_km:    alt,
+        inclination_deg: incl,
+        raan_deg:        raan,
+        time_iso:        new Date().toISOString(),
+      })
+      globeRef.current.addPinEntity('orbit-pin', pos.lon, pos.lat, alt, 'orbit')
+      globeRef.current.flyTo(pos.lon, pos.lat, alt)
+      orbitPinnedRef.current = true
+    } catch {
+      // silent — pin is best-effort visualisation; don't block the form
+    }
+  }
 
   useEffect(() => {
     api.getLaunchSites()
@@ -116,8 +154,8 @@ export default function PlanForm({ onSubmit, onChange, submitting }) {
   return (
     <form className="mission-form" onSubmit={handleSubmit}>
 
-      {/* ── Start position toggle ─────────────────────────────────── */}
-      <div className="field">
+      {/* ── Start position toggle — full width ───────────────────── */}
+      <div className="field form-grid-span" data-testid="field-start-position">
         <span>Start position</span>
         <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
           <button
@@ -139,158 +177,206 @@ export default function PlanForm({ onSubmit, onChange, submitting }) {
         </div>
       </div>
 
-      {/* ── Launch-site mode ─────────────────────────────────────── */}
-      {startMode === 'site' && (
-        <>
-          <label className="field">
-            Select launch site
-            <select
-              required
-              value={siteForm.launch_site}
-              disabled={sitesLoading}
-              onChange={(e) => {
-                setSiteForm((prev) => ({ ...prev, launch_site: e.target.value }))
-                onChange?.()
-              }}
-            >
-              {sitesLoading && <option value="">Loading sites…</option>}
-              {siteOptions.map(([key, site]) => (
-                <option key={key} value={key}>
-                  {site.name} — min {site.min_inclination}° incl, {site.lat}° lat
-                </option>
-              ))}
-            </select>
-          </label>
+      {/* ── 2-column grid starts here ─────────────────────────────── */}
+      <div className="form-grid" data-testid="form-grid">
 
-          <label className="field">
-            Inclination override (optional)
-            <input
-              type="number"
-              step="0.1"
-              placeholder="Leave blank to use site default"
-              value={siteForm.inclination_deg}
-              onChange={(e) => {
-                setSiteForm((prev) => ({ ...prev, inclination_deg: e.target.value }))
-                onChange?.()
-              }}
-            />
-          </label>
-        </>
-      )}
+        {/* ── Launch-site mode ──────────────────────────────────── */}
+        {startMode === 'site' && (
+          <>
+            {/* Select launch site spans full width (long dropdown) */}
+            <div className="field form-grid-span">
+              <span>Select launch site</span>
+              <div className="field-with-pin">
+                <select
+                  required
+                  value={siteForm.launch_site}
+                  disabled={sitesLoading}
+                  onChange={(e) => {
+                    setSiteForm((prev) => ({ ...prev, launch_site: e.target.value }))
+                    if (sitePinnedRef.current) {
+                      globeRef?.current?.removePinEntity('launch-site-pin')
+                      sitePinnedRef.current = false
+                    }
+                    onChange?.()
+                  }}
+                >
+                  {sitesLoading && <option value="">Loading sites…</option>}
+                  {siteOptions.map(([key, site]) => (
+                    <option key={key} value={key}>
+                      {site.name} — min {site.min_inclination}° incl, {site.lat}° lat
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="pin-btn"
+                  title="Pin launch site on globe"
+                  disabled={sitesLoading || !siteForm.launch_site}
+                  onClick={handlePinSite}
+                >
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                    <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
 
-      {/* ── Raw orbit mode ────────────────────────────────────────── */}
-      {startMode === 'raw' && (
-        <>
-          <label className="field">
-            Starting altitude (km)
-            <input
-              type="number"
-              required
-              value={required.start_altitude_km}
-              onChange={(e) => updateRequired('start_altitude_km', e.target.value)}
-            />
-          </label>
+            {/* Inclination override — single col (pairs with fuel budget) */}
+            <label className="field">
+              Incl. override (°)
+              <input
+                type="number"
+                step="0.1"
+                placeholder="Site default"
+                value={siteForm.inclination_deg}
+                onChange={(e) => {
+                  setSiteForm((prev) => ({ ...prev, inclination_deg: e.target.value }))
+                  onChange?.()
+                }}
+              />
+            </label>
+          </>
+        )}
 
-          <label className="field">
-            Starting inclination (deg)
-            <input
-              type="number"
-              required
-              value={required.start_inclination_deg}
-              onChange={(e) => updateRequired('start_inclination_deg', e.target.value)}
-            />
-          </label>
-        </>
-      )}
+        {/* ── Raw orbit mode ──────────────────────────────────────── */}
+        {startMode === 'raw' && (
+          <>
+            <label className="field">
+              Altitude (km)
+              <input
+                type="number"
+                required
+                value={required.start_altitude_km}
+                onChange={(e) => {
+                  updateRequired('start_altitude_km', e.target.value)
+                  if (orbitPinnedRef.current) {
+                    globeRef?.current?.removePinEntity('orbit-pin')
+                    orbitPinnedRef.current = false
+                  }
+                }}
+              />
+            </label>
 
-      {/* ── Fuel budget — always visible ─────────────────────────── */}
-      <label className="field">
-        Fuel budget (km/s)
-        <input
-          type="number"
-          required
-          step="0.01"
-          value={required.fuel_budget_km_s}
-          onChange={(e) => updateRequired('fuel_budget_km_s', e.target.value)}
-        />
-      </label>
+            <label className="field">
+              Inclination (°)
+              <input
+                type="number"
+                required
+                value={required.start_inclination_deg}
+                onChange={(e) => {
+                  updateRequired('start_inclination_deg', e.target.value)
+                  if (orbitPinnedRef.current) {
+                    globeRef?.current?.removePinEntity('orbit-pin')
+                    orbitPinnedRef.current = false
+                  }
+                }}
+              />
+            </label>
 
-      {/* ── Advanced options ──────────────────────────────────────── */}
-      <button type="button" className="btn" onClick={() => setAdvancedOpen((o) => !o)}>
-        {advancedOpen ? 'Hide advanced options' : 'Show advanced options'}
-      </button>
+            {/* Pin orbit button — spans full width */}
+            <div className="form-grid-span" style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="pin-btn pin-btn--orbit"
+                title="Preview orbital position on globe"
+                disabled={!required.start_altitude_km || !required.start_inclination_deg}
+                onClick={handlePinOrbit}
+              >
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                  <path d="M17 3.34A10 10 0 0 1 22 12.01l-.01.44A10 10 0 1 1 17 3.34zm-4.39 13.97l1.31-1.31-2.83-2.83-1.31 1.31a1 1 0 0 0 0 1.41l1.42 1.42a1 1 0 0 0 1.41 0zm4.24-4.24a1 1 0 0 0 0-1.41l-1.42-1.42a1 1 0 0 0-1.41 0l-1.31 1.31 2.83 2.83 1.31-1.31z"/>
+                </svg>
+                <span style={{ marginLeft: 4, fontSize: 10, fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Pin orbit
+                </span>
+              </button>
+            </div>
+          </>
+        )}
 
-      {advancedOpen && (
-        <fieldset>
-          <label className="field">
-            Candidate pool size
-            <input
-              type="number"
-              placeholder="Default: 40"
-              value={advanced.pool_size}
-              onChange={(e) => updateAdvanced('pool_size', e.target.value)}
-            />
-          </label>
+        {/* ── Fuel budget ─────────────────────────────────────────── */}
+        <label className="field">
+          Fuel budget (km/s)
+          <input
+            type="number"
+            required
+            step="0.01"
+            value={required.fuel_budget_km_s}
+            onChange={(e) => updateRequired('fuel_budget_km_s', e.target.value)}
+          />
+        </label>
 
-          <label className="field">
-            Risk penalty scale
-            <input
-              type="number"
-              step="0.01"
-              placeholder="Default: 3000"
-              value={advanced.risk_penalty_scale}
-              onChange={(e) => updateAdvanced('risk_penalty_scale', e.target.value)}
-            />
-          </label>
+        {/* ── Advanced — pool size + risk penalty pair ─────────────── */}
+        <label className="field">
+          Pool size
+          <input
+            type="number"
+            placeholder="default: 40"
+            value={advanced.pool_size}
+            onChange={(e) => updateAdvanced('pool_size', e.target.value)}
+          />
+        </label>
 
-          <label className="field">
-            Nets carried
-            <input
-              type="number"
-              placeholder="Default: 1"
-              value={advanced.nets_carried}
-              onChange={(e) => updateAdvanced('nets_carried', e.target.value)}
-            />
-          </label>
+        <label className="field">
+          Risk penalty
+          <input
+            type="number"
+            step="0.01"
+            placeholder="default: 3000"
+            value={advanced.risk_penalty_scale}
+            onChange={(e) => updateAdvanced('risk_penalty_scale', e.target.value)}
+          />
+        </label>
 
-          <label className="field">
-            Restrict to removal method
-            <select
-              value={advanced.removal_method_filter}
-              onChange={(e) => updateAdvanced('removal_method_filter', e.target.value)}
-            >
-              {REMOVAL_METHOD_FILTER_OPTIONS.map((opt) => (
-                <option key={opt} value={opt}>
-                  {opt === '' ? 'No restriction (all methods)' : opt}
-                </option>
-              ))}
-            </select>
-          </label>
+        <label className="field">
+          Nets carried
+          <input
+            type="number"
+            placeholder="default: 1"
+            value={advanced.nets_carried}
+            onChange={(e) => updateAdvanced('nets_carried', e.target.value)}
+          />
+        </label>
 
-          <label className="field">
-            Starting RAAN (deg, optional)
-            <input
-              type="number"
-              step="any"
-              title="Spacecraft's current orbital plane orientation. Leave blank if unknown."
-              value={advanced.start_raan_deg}
-              onChange={(e) => updateAdvanced('start_raan_deg', e.target.value)}
-              placeholder="Leave blank if unknown"
-            />
-          </label>
+        <label className="field">
+          RAAN (°)
+          <input
+            type="number"
+            step="any"
+            title="Spacecraft's current orbital plane orientation. Leave blank if unknown."
+            value={advanced.start_raan_deg}
+            onChange={(e) => updateAdvanced('start_raan_deg', e.target.value)}
+            placeholder="Optional"
+          />
+        </label>
 
-          <label className="field">
-            Risk weights (JSON)
-            <textarea
-              value={advanced.weights_json}
-              onChange={(e) => updateAdvanced('weights_json', e.target.value)}
-              placeholder='e.g. {"proximity": 0.5, "lifetime": 0.3, "size": 0.2}'
-            />
-          </label>
-        </fieldset>
-      )}
+        {/* Removal method spans full width (long dropdown) */}
+        <label className="field form-grid-span">
+          Removal method
+          <select
+            value={advanced.removal_method_filter}
+            onChange={(e) => updateAdvanced('removal_method_filter', e.target.value)}
+          >
+            {REMOVAL_METHOD_FILTER_OPTIONS.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt === '' ? 'No restriction (all methods)' : opt}
+              </option>
+            ))}
+          </select>
+        </label>
 
-      <button type="submit" className="btn btn-primary" disabled={submitting}>
+        {/* Risk weights spans full width (textarea) */}
+        <label className="field form-grid-span">
+          Risk weights (JSON)
+          <textarea
+            value={advanced.weights_json}
+            onChange={(e) => updateAdvanced('weights_json', e.target.value)}
+            placeholder='e.g. {"proximity": 0.5, "lifetime": 0.3, "size": 0.2}'
+          />
+        </label>
+
+      </div>{/* end .form-grid */}
+
+      <button type="submit" className="btn btn-primary" disabled={submitting} style={{ width: '100%', marginTop: 4 }}>
         {submitting ? 'Generating plan…' : 'Generate plan'}
       </button>
     </form>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
 import { Viewer, Entity, PolylineGraphics, PointGraphics } from 'resium'
 import { Cartesian3, Color, Credit, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
 
@@ -109,7 +109,9 @@ function useCacheAge(dataFetchedAt) {
   return ageMin
 }
 
-export default function DebrisGlobe({
+// Expose { flyTo(lon, lat, altKm), addPinEntity(id, lon, lat, altKm, type), removePinEntity(id) }
+// to parent via ref so PlanForm pin buttons can drive the globe without prop-drilling through App.
+const DebrisGlobe = forwardRef(function DebrisGlobe({
   debrisField,
   route,
   depot,
@@ -130,9 +132,72 @@ export default function DebrisGlobe({
   onDebrisSelect,
   onDebrisToggleSelect,
   onBackgroundClick,
-}) {
+}, ref) {
   const viewerRef = useRef(null)
+  // Track pin entities keyed by caller-provided id so we can remove the old one on re-pin.
+  const pinEntitiesRef = useRef({})
   const ageMin = useCacheAge(cacheMetadata?.data_fetched_at)
+
+  useImperativeHandle(ref, () => ({
+    /** Smoothly fly the camera to the given geographic position at the given range. */
+    flyTo(lon, lat, altKm) {
+      const viewer = viewerRef.current?.cesiumElement
+      if (!viewer) return
+      viewer.camera.flyTo({
+        destination: Cartesian3.fromDegrees(lon, lat, altKm * 1000 + 2_000_000),
+        duration: 1.5,
+      })
+    },
+
+    /** Place a billboard pin entity at the given position, replacing any prior entity with same id. */
+    addPinEntity(id, lon, lat, altKm, type = 'site') {
+      const viewer = viewerRef.current?.cesiumElement
+      if (!viewer) return
+      // Remove prior entity for this id if present
+      if (pinEntitiesRef.current[id]) {
+        viewer.entities.remove(pinEntitiesRef.current[id])
+      }
+      // Inline SVG data-URI for house (site) and satellite icons.
+      // Using data URIs keeps zero external dependencies.
+      const svgHouse = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="28" height="28">
+        <polygon points="12,2 2,10 4,10 4,22 10,22 10,15 14,15 14,22 20,22 20,10 22,10" fill="#f2f2f0" stroke="#000" stroke-width="1.2"/>
+      </svg>`
+      const svgSat = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="28" height="28">
+        <circle cx="12" cy="12" r="3" fill="#f2f2f0"/>
+        <line x1="12" y1="5" x2="12" y2="1" stroke="#f2f2f0" stroke-width="2"/>
+        <line x1="12" y1="23" x2="12" y2="19" stroke="#f2f2f0" stroke-width="2"/>
+        <line x1="5" y1="12" x2="1" y2="12" stroke="#f2f2f0" stroke-width="2"/>
+        <line x1="23" y1="12" x2="19" y2="12" stroke="#f2f2f0" stroke-width="2"/>
+        <rect x="3" y="10" width="6" height="4" fill="#3b82d4" stroke="#f2f2f0" stroke-width="0.8"/>
+        <rect x="15" y="10" width="6" height="4" fill="#3b82d4" stroke="#f2f2f0" stroke-width="0.8"/>
+      </svg>`
+      const svgData = type === 'site' ? svgHouse : svgSat
+      const dataUri = `data:image/svg+xml;base64,${btoa(svgData)}`
+
+      const entity = viewer.entities.add({
+        position: Cartesian3.fromDegrees(lon, lat, altKm * 1000),
+        billboard: {
+          image: dataUri,
+          width: 28,
+          height: 28,
+          verticalOrigin: 1, // BOTTOM — pin hangs above the point
+          eyeOffset: new Cartesian3(0, 0, -500), // slight depth offset so it renders above debris dots
+        },
+      })
+      pinEntitiesRef.current[id] = entity
+    },
+
+    /** Remove a previously added pin entity by id. */
+    removePinEntity(id) {
+      const viewer = viewerRef.current?.cesiumElement
+      if (!viewer) return
+      if (pinEntitiesRef.current[id]) {
+        viewer.entities.remove(pinEntitiesRef.current[id])
+        delete pinEntitiesRef.current[id]
+      }
+    },
+  }))
+
 
   // Wire Cesium's ScreenSpaceEventHandler for left-click on the globe.
   // We use the native Cesium API rather than resium's onClick to reliably
@@ -334,4 +399,6 @@ export default function DebrisGlobe({
     </Viewer>
     </div>
   )
-}
+})
+
+export default DebrisGlobe
