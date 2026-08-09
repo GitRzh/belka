@@ -154,3 +154,11 @@ pytest + curl before merge.
 - **C:** Zero-visit warning simplified — now references only `min_depot_hop_km_s` (the only remaining actionable diagnostic).
 - **Bugs fixed (1):** Root cause of systematic 0-visit failure — default `RISK_PENALTY_SCALE = 3000` produced skip-penalties (≤ 3000 integer units) always below real depot arc costs (5 000–13 000 units for 5–13 km/s hops); solver rationally chose to skip every node. Fix is the model change above, not a constant bump.
 - **Testing:** +2 tests (`test_route_ordered_by_risk_score_desc`, `test_route_ordered_by_risk_score_desc_empty_route`). Suite: 101 → 103 total, 99 passing. 4 pre-existing failures (LLM cache, Groq fallback, replan parse-override retry) — unaffected.
+
+## Removal Method Expert System (GET /debris/{id}/removal-methods)
+
+- **C:** New endpoint generates per-object LLM reasoning grounded only in real TLE signals (BSTAR, altitude, inclination, risk_score); single Groq call (`openai/gpt-oss-20b`, distinct from `120b` used by route briefings); result cached in `_reasoning_cache` by `norad_id`; graceful degradation returns `reasoning_unavailable: true` on failure (never 500).
+- **C:** Post-parse alternatives filter validates LLM output against a fixed allowlist (`net_capture`, `robotic_arm`, `monitor_only`); hallucinated method names silently dropped.
+- **Frontend:** `DebrisInfoModal` gains a two-tab row (Info / Reason); Reason tab visible and default only when the clicked object is in the active plan's route target list; client-side reasoning cache via `useRef(Map)` prevents refetch on tab switch; NORAD ID shown as first field in Reason tab.
+- **Frontend:** `activeRouteNoradIds` derived from `activePlan.route_details` in `App.jsx` and passed to `DebrisInfoModal`.
+- **Testing:** +5 tests (`test_response_shape`, `test_content_safety_no_invented_mass_or_material`, `test_cache_prevents_second_llm_call`, `test_groq_failure_returns_200_not_500`, `test_alternatives_only_contains_known_methods`).

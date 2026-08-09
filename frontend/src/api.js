@@ -47,6 +47,8 @@ export const api = {
 
   getDebrisById: (noradId) => request(`/debris/${noradId}`),
 
+  getRemovalMethods: (noradId) => request(`/debris/${noradId}/removal-methods`),
+
   getNaiveRoute: (params) => {
     const qs = new URLSearchParams({
       fuel_budget_km_s: params.fuel_budget_km_s,

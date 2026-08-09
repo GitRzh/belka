@@ -68,6 +68,13 @@ def _data_quality(epoch_age_days: float) -> str:
 # any specific object or live orbital state, so it never needs invalidation.
 _REMOVAL_METHOD_EXPLANATION_CACHE: dict[str, tuple[str, str]] = {}
 
+# In-memory cache for per-object removal-method REASONING (new expert system layer).
+# Keyed by norad_id (int).  Populated on first call to GET /debris/{id}/removal-methods,
+# then served from cache on all subsequent calls — never re-calls the LLM for the same id.
+# Bounded by the number of distinct objects the user clicks on in a session; typical
+# sessions visit a handful, so this never grows large.
+_reasoning_cache: dict[int, dict] = {}
+
 # M3: in-memory cache for the default scored + enriched field (no custom weights).
 # Keyed by the TLE cache file's mtime string so it auto-invalidates whenever
 # get_debris_field() writes a fresh fetch.  Custom-weights calls (from /plan or
@@ -418,6 +425,135 @@ def debris_detail(norad_id: int):
     if match is None:
         raise HTTPException(status_code=404, detail=f"norad_id {norad_id} not found in current 700-1000km band field")
     return match
+
+
+# Allowlist for alternatives returned by the reasoning LLM.  Any name outside
+# this set is silently dropped — the LLM may hallucinate methods that don't
+# exist in this system's classification logic.
+_REASONING_ALT_ALLOWLIST = {"net_capture", "robotic_arm", "monitor_only"}
+
+
+@app.get("/debris/{norad_id}/removal-methods")
+def debris_removal_methods(norad_id: int):
+    """Expert-system reasoning layer on top of the existing removal_method classification.
+
+    Returns the LLM-generated reasoning for WHY a specific removal method was chosen
+    for this object, grounded ONLY in available signals: BSTAR, altitude, inclination,
+    risk_score, and the existing removal_method classification from removal_method.py.
+
+    Caches by norad_id in _reasoning_cache for the process lifetime.
+    Single engine: Groq openai/gpt-oss-20b (distinct from the openai/gpt-oss-120b
+    model used by _explain_plan/_explain_diff for route briefings).
+    If the call fails: returns reasoning_unavailable=True with no reasoning text (never 500).
+    """
+    # Step 1 — look up the object
+    scored = _get_scored_field()
+    obj = next((o for o in scored if o["norad_id"] == norad_id), None)
+    if obj is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"norad_id {norad_id} not found in current 700-1000km band field",
+        )
+
+    removal_method = obj.get("removal_method", "unknown")
+
+    # Step 2 — serve from cache if already generated
+    if norad_id in _reasoning_cache:
+        return _reasoning_cache[norad_id]
+
+    # Step 3 — build prompt using ONLY real available signals (no invented mass/material)
+    bstar = obj.get("bstar", 0.0)
+    altitude_km = obj.get("altitude_km")
+    inclination_deg = obj.get("inclination_deg")
+    risk_score = obj.get("risk_score")
+    object_type = obj.get("object_type", "unknown")
+
+    # Describe BSTAR in relative terms so the LLM uses only the signal,
+    # not inventing mass numbers — the prompt explicitly forbids specific mass/material.
+    bstar_abs = abs(bstar)
+    if bstar_abs > 1e-4:
+        bstar_desc = f"{bstar:.4e} (high — indicates a low-mass, high-drag object)"
+    elif bstar_abs > 1e-5:
+        bstar_desc = f"{bstar:.4e} (moderate drag)"
+    else:
+        bstar_desc = f"{bstar:.4e} (low — indicates a denser/larger object with less atmospheric drag)"
+
+    prompt = (
+        "You are an orbital debris removal expert system. "
+        "Your task is to explain, in 2-4 plain-English sentences, WHY the selected removal "
+        "method is appropriate for this specific debris object, using ONLY the orbital signals "
+        "listed below. Do NOT state or infer a specific mass in kg, a specific material name "
+        "(e.g. aluminium, titanium), or any physical property that is not derivable from the "
+        "signals. You may make relative statements such as 'high BSTAR suggests a low-mass, "
+        "high-drag object'. Also suggest 1-3 alternatives with a one-sentence reason each.\n\n"
+        f"Object signals:\n"
+        f"  BSTAR (drag term):    {bstar_desc}\n"
+        f"  Altitude:             {altitude_km} km\n"
+        f"  Inclination:          {inclination_deg}°\n"
+        f"  Risk score:           {risk_score}\n"
+        f"  Object type:          {object_type} ({'fragment with DEB in name' if object_type == 'fragment' else 'intact/parent object, no DEB in name'})\n"
+        f"  Removal method chosen: {removal_method}\n\n"
+        "Respond with ONLY a JSON object — no prose, no markdown — in this exact shape:\n"
+        '{"reasoning": "<2-4 sentences>", '
+        '"alternatives": [{"name": "<method>", "why": "<one sentence>"}]}\n'
+        "The 'name' in each alternative must be one of: "
+        "net_capture, robotic_arm, monitor_only."
+    )
+
+    # Step 4 — single Groq call (openai/gpt-oss-20b).
+    # Intentionally distinct from openai/gpt-oss-120b used by _explain_plan/_explain_diff
+    # for route briefings — logged with feature tag [removal-methods] for traceability.
+    reasoning_text: Optional[str] = None
+    raw_alternatives: list[dict] = []
+
+    try:
+        groq_resp = _groq_client().chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            timeout=20.0,
+        )
+        raw_text = (groq_resp.choices[0].message.content or "").strip()
+        # Strip markdown fences if the model wraps in ```json ... ```
+        if raw_text.startswith("```"):
+            raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
+            raw_text = re.sub(r"\n?```$", "", raw_text)
+        parsed = json.loads(raw_text)
+        reasoning_text = parsed.get("reasoning")
+        raw_alternatives = parsed.get("alternatives", [])
+        logger.info(
+            "[removal-methods] norad_id=%d reasoning served (model=openai/gpt-oss-20b)",
+            norad_id,
+        )
+    except Exception as groq_err:
+        logger.error(
+            "[removal-methods] Groq failed for norad_id=%d: %s — returning reasoning_unavailable",
+            norad_id,
+            groq_err,
+        )
+
+    # Step 5 — filter alternatives against the fixed allowlist.
+    # Drop any entry whose 'name' is not in _REASONING_ALT_ALLOWLIST so that
+    # hallucinated method names (e.g. laser_ablation) never reach the client.
+    alternatives = [
+        a for a in raw_alternatives
+        if isinstance(a, dict) and a.get("name") in _REASONING_ALT_ALLOWLIST
+    ]
+
+    # Step 6 — build response; never crash even if the LLM failed
+    reasoning_unavailable = reasoning_text is None
+    response: dict[str, Any] = {
+        "norad_id": norad_id,
+        "removal_method": removal_method,
+        "reasoning": reasoning_text,
+        "reasoning_unavailable": reasoning_unavailable,
+        "alternatives": alternatives,
+    }
+
+    # Cache before returning — even on failure, so repeated clicks on a
+    # broken-LLM session don't retry an already-failed call.
+    _reasoning_cache[norad_id] = response
+    return response
 
 
 def _run_plan(req: PlanRequest) -> dict[str, Any]:

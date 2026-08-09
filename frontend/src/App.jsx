@@ -793,12 +793,32 @@ export default function App() {
             const debris = debrisField.find(d => d.norad_id === activeDebrisId)
             if (!debris) return null
             const isPinned = pinnedDebris.has(activeDebrisId)
+            // Build the set of NORAD IDs in the current active plan route so the
+            // DebrisInfoModal can decide whether to show the Reason tab.
+            // route_details is the canonical source — it has norad_id directly.
+            // Falls back to parsing "NAME (norad_id)" labels from route[] if needed.
+            let activeRouteNoradIds = null
+            if (activePlan) {
+              const ids = new Set()
+              if (activePlan.route_details?.length) {
+                for (const d of activePlan.route_details) {
+                  if (d.norad_id != null) ids.add(d.norad_id)
+                }
+              } else if (activePlan.route?.length) {
+                for (const label of activePlan.route) {
+                  const m = label.match(/\((\d+)\)$/)
+                  if (m) ids.add(Number(m[1]))
+                }
+              }
+              if (ids.size > 0) activeRouteNoradIds = ids
+            }
             return (
               <DebrisInfoModal
                 debris={debris}
                 pinned={isPinned}
                 onPin={() => handleDebrisPin(debris)}
                 onClose={handleDebrisClose}
+                activeRouteNoradIds={activeRouteNoradIds}
               />
             )
           })()}
