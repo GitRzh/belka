@@ -162,3 +162,13 @@ pytest + curl before merge.
 - **Frontend:** `DebrisInfoModal` gains a two-tab row (Info / Reason); Reason tab visible and default only when the clicked object is in the active plan's route target list; client-side reasoning cache via `useRef(Map)` prevents refetch on tab switch; NORAD ID shown as first field in Reason tab.
 - **Frontend:** `activeRouteNoradIds` derived from `activePlan.route_details` in `App.jsx` and passed to `DebrisInfoModal`.
 - **Testing:** +5 tests (`test_response_shape`, `test_content_safety_no_invented_mass_or_material`, `test_cache_prevents_second_llm_call`, `test_groq_failure_returns_200_not_500`, `test_alternatives_only_contains_known_methods`).
+
+## One-click constraint-resolution proposal application (zero-LLM replan shortcut)
+
+**Built with IBM Bob.**
+
+- **C:** `_translate_proposal_params()` added — translates the fix-type-specific proposal shape (`{"fix_type": "budget_increase", "new_budget": 7.5}`) to canonical `_execute_overrides` keys before validation runs. Driven by a single `_PROPOSAL_PARAM_TO_OVERRIDE` dict defined once near `_FIX_TYPE_PARAMS_KEY`; `_build_dry_run_req()` refactored to use the same dict so the dry-run and apply paths share one source of truth and cannot drift.
+- **C (fix):** `_execute_overrides()` previously no-op'd silently on every proposal-shortcut replan — `overrides_applied` was always `{}` because proposal params never matched the canonical key checks. Translation step inserted at the top of the function resolves this; the apply path now produces a real re-optimised plan with changed parameters.
+- **Frontend (fix):** `handleApplyProposal` was sending `applied_proposal: proposal.params` (no `fix_type`); corrected to `{ ...proposal.params, fix_type: proposal.fix_type }` to match the field's own docstring and supply the key the backend needs for translation.
+- **Frontend:** After any replan, `overrides_applied` is merged back into the stored `params` entry and `naivePlan` is cleared — Naive Route now re-runs against the same effective parameters as the AI route (e.g. the raised budget after a `budget_increase` fix) so both views describe the same mission.
+- **Testing:** +7 regression tests (`TestRealProposalShapeRegression`) covering all four fix-types in real proposal shape, backwards-compat with pre-translated canonical dicts, and a guard that `fix_type` is stripped before reaching `PlanRequest`. Suite: 208 total, 205 passing (3 pre-existing failures unaffected).

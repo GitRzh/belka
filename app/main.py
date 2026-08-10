@@ -718,6 +718,21 @@ _FIX_TYPE_PARAMS_KEY: dict[str, str] = {
     "method_filter_change": "removal_method",
 }
 
+# Mapping from fix_type-specific param key → canonical PlanRequest / override key.
+# Defined here — near _FIX_TYPE_PARAMS_KEY — so both _build_dry_run_req and
+# _execute_overrides share the same data structure rather than two independent
+# if/elif chains that can drift.
+_PROPOSAL_PARAM_TO_OVERRIDE: dict[str, str] = {
+    # fix_type "budget_increase"      → params{"new_budget": <float>}
+    "new_budget":     "fuel_budget_km_s",
+    # fix_type "pool_size_increase"   → params{"new_pool_size": <int>}
+    "new_pool_size":  "pool_size",
+    # fix_type "altitude_expand"      → params{"altitude_km": <float>}
+    "altitude_km":    "start_altitude_km",
+    # fix_type "method_filter_change" → params{"removal_method": <str|null>}
+    "removal_method": "removal_method_filter",
+}
+
 # Valid method values for method_filter_change (Layer 3 bounds check).
 _VALID_PROPOSAL_METHODS = {"net_capture", "robotic_arm_or_net_capture"}
 
@@ -786,27 +801,34 @@ def _validate_proposals(raw_proposals: list[Any]) -> list[dict[str, Any]]:
 def _build_dry_run_req(req: PlanRequest, proposal: dict[str, Any]) -> Optional[PlanRequest]:
     """Translate a validated proposal's params into a PlanRequest for dry-run.
 
+    Uses ``_PROPOSAL_PARAM_TO_OVERRIDE`` to map fix-type-specific param keys to
+    canonical PlanRequest field names — the same mapping ``_execute_overrides``
+    uses via ``_translate_proposal_params``, so the two paths stay in sync.
+
     Returns None for fix_types that cannot meaningfully be expressed as a
     PlanRequest override (currently none — all four map cleanly), or if the
     constructed request would be invalid.  Callers must treat None as
     "skip dry-run for this proposal"."""
     fix_type = proposal.get("fix_type")
     params   = proposal.get("params", {})
+    if fix_type not in _VALID_FIX_TYPES:
+        return None
     try:
         base = req.model_dump()
         base.pop("user_request_text", None)
         base.pop("applied_proposal", None)
 
-        if fix_type == "budget_increase":
-            base["fuel_budget_km_s"] = float(params["new_budget"])
-        elif fix_type == "pool_size_increase":
-            base["pool_size"] = int(params["new_pool_size"])
-        elif fix_type == "altitude_expand":
-            base["start_altitude_km"] = float(params["altitude_km"])
-        elif fix_type == "method_filter_change":
-            base["removal_method_filter"] = params["removal_method"]
-        else:
-            return None
+        # Translate each proposal param key to the canonical PlanRequest field.
+        # Type coercions (float/int) match the original per-type branches exactly.
+        param_key = _FIX_TYPE_PARAMS_KEY[fix_type]
+        override_key = _PROPOSAL_PARAM_TO_OVERRIDE[param_key]
+        raw_val = params[param_key]
+        if fix_type == "pool_size_increase":
+            base[override_key] = int(raw_val)
+        elif fix_type in ("budget_increase", "altitude_expand"):
+            base[override_key] = float(raw_val)
+        else:  # method_filter_change — str or None, pass through as-is
+            base[override_key] = raw_val
 
         return PlanRequest(**base)
     except Exception as exc:
@@ -1261,6 +1283,41 @@ def _norad_ids_from_plan(plan_result: dict[str, Any]) -> set[int]:
     return ids
 
 
+def _translate_proposal_params(raw: dict) -> dict:
+    """If *raw* contains a ``fix_type`` key (i.e. it arrived as a real proposal
+    shape from the frontend), translate its fix-type-specific param key to the
+    canonical override key that ``_execute_overrides`` understands.
+
+    Example::
+
+        {"fix_type": "budget_increase", "new_budget": 7.5}
+        → {"fuel_budget_km_s": 7.5}
+
+    The mapping is driven by ``_PROPOSAL_PARAM_TO_OVERRIDE`` — the **same**
+    dict that powers ``_build_dry_run_req``'s translation — so both paths stay
+    in sync by construction.
+
+    Raises nothing.  Keys that aren't in the mapping are passed through
+    unchanged (so canonical keys like ``fuel_budget_km_s`` already present in
+    *raw* survive un-touched, preserving backwards compatibility with any caller
+    that already pre-translates).
+    """
+    if "fix_type" not in raw:
+        # Nothing to translate — already in canonical form (free-text path).
+        return raw
+
+    translated: dict[str, Any] = {}
+    for k, v in raw.items():
+        if k == "fix_type":
+            continue  # consumed; not a PlanRequest field
+        canonical = _PROPOSAL_PARAM_TO_OVERRIDE.get(k)
+        if canonical is not None:
+            translated[canonical] = v
+        else:
+            translated[k] = v  # pass through unknown / already-canonical keys
+    return translated
+
+
 def _execute_overrides(req: PlanRequest, raw_overrides: dict) -> dict:
     """Steps 3–7 of the replan pipeline: validate raw_overrides, compute old/new
     plans, diff, explain, and return the assembled response dict.
@@ -1271,7 +1328,18 @@ def _execute_overrides(req: PlanRequest, raw_overrides: dict) -> dict:
                            params from a validated proposal, bypassing LLM parse).
 
     Both paths go through the exact same per-type validation so there is no
-    separate weaker path for the proposal shortcut."""
+    separate weaker path for the proposal shortcut.
+
+    Proposal-shape dicts (containing a ``fix_type`` key) are translated to
+    canonical override keys by ``_translate_proposal_params`` before validation
+    so that e.g. ``{"fix_type": "budget_increase", "new_budget": 7.5}`` is
+    handled identically to the already-translated ``{"fuel_budget_km_s": 7.5}``
+    that the free-text path emits."""
+
+    # ------------------------------------------------------------------ #
+    # Step 2b -- if raw_overrides is in proposal shape, translate it     #
+    # ------------------------------------------------------------------ #
+    raw_overrides = _translate_proposal_params(raw_overrides)
 
     # ------------------------------------------------------------------ #
     # Step 3 -- validate overrides before touching the optimizer          #

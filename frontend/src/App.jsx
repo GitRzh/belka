@@ -403,7 +403,12 @@ export default function App() {
       const result = await api.replan(replanParams)
       setPlan(result.new_plan)
       setRouteMode('ai')
-      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: replanParams, result } : e))
+      setNaivePlan(null)
+      // Fold overrides_applied back into params so handleToggleNaive uses the
+      // effective post-replan values (e.g. fuel_budget_km_s after a budget change)
+      // rather than the original pre-replan values.
+      const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result } : e))
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -626,17 +631,25 @@ export default function App() {
     const id = baseEntry.id
     const replanParams = {
       ...baseEntry.params,
-      // applied_proposal carries the params dict from the validated proposal.
+      // applied_proposal carries the proposal's params merged with its fix_type,
+      // matching the field's own docstring: "the 'params' dict … merged with its
+      // fix_type".  The backend's _translate_proposal_params() uses fix_type to
+      // route the param key to the correct canonical override key.
       // user_request_text is intentionally omitted — the backend accepts an empty
       // string when applied_proposal is present.
-      applied_proposal: proposal.params,
+      applied_proposal: { ...proposal.params, fix_type: proposal.fix_type },
     }
     setHistory(h => h.map(e => e.id === id ? { ...e, status: 'running', result: null, error: null } : e))
     try {
       const result = await api.replan(replanParams)
       setPlan(result.new_plan)
       setRouteMode('ai')
-      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: replanParams, result, kind: 'replan' } : e))
+      setNaivePlan(null)
+      // Fold overrides_applied back into params so handleToggleNaive uses the
+      // effective post-replan values (e.g. fuel_budget_km_s after a budget change)
+      // rather than the original pre-replan values.
+      const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result, kind: 'replan' } : e))
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
