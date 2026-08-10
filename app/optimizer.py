@@ -37,6 +37,11 @@ except ImportError:
 DEFAULT_NETS_CARRIED = 1  # RemoveDEBRIS's actual flight history: exactly one net carried.
 
 SOLVER_TIME_LIMIT_SECONDS = 5
+# Dry-run calls only need visited_count > 0; OR-Tools returns as soon as it
+# finds any feasible solution, so 1 s is enough to confirm feasibility
+# without finding the optimal route.  Named constant so main.py's
+# _dry_run_plan() can reference it without a magic number.
+DRY_RUN_TIME_LIMIT_SECONDS = 1
 
 # Heuristic: days of elapsed mission time per km/s of delta-v spent.
 # Based on a rough LEO transfer time estimate (~1 day per 0.1 km/s of dv
@@ -76,6 +81,7 @@ def optimize_route(
     start_inclination_deg: float,
     start_raan_deg: float = 0.0,
     nets_carried: int = DEFAULT_NETS_CARRIED,
+    time_limit_seconds: int = SOLVER_TIME_LIMIT_SECONDS,
 ) -> dict[str, Any]:
     """
     Solve the fuel-optimal coverage problem over `pool` (the ~30-50 candidate
@@ -165,7 +171,7 @@ def optimize_route(
     search_params.local_search_metaheuristic = (
         routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     )
-    search_params.time_limit.FromSeconds(SOLVER_TIME_LIMIT_SECONDS)
+    search_params.time_limit.FromSeconds(time_limit_seconds)
 
     solution = routing.SolveWithParameters(search_params)
 

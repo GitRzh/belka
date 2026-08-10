@@ -35,7 +35,7 @@ from app.tle_fetch import get_debris_field, get_cache_timestamp, CACHE_MAX_AGE_S
 from app.launch_sites import LAUNCH_SITES, derive_start_orbit
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE, DELTA_V_SCALE
-from app.optimizer import optimize_route, solve_forced_route, TRANSFER_TIME_DAYS_PER_KM_S
+from app.optimizer import optimize_route, solve_forced_route, TRANSFER_TIME_DAYS_PER_KM_S, DRY_RUN_TIME_LIMIT_SECONDS
 from app.removal_method import add_removal_methods, METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE, METHOD_MONITOR_ONLY
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -329,7 +329,34 @@ class PlanRequest(BaseModel):
 
 
 class ReplanRequest(PlanRequest):
-    user_request_text: str = Field(..., description="Plain-English override instructions, e.g. 'use only 1.5 km/s of fuel'")
+    user_request_text: str = Field(
+        "",
+        description=(
+            "Plain-English override instructions, e.g. 'use only 1.5 km/s of fuel'. "
+            "Required (non-empty) when applied_proposal is None. "
+            "May be omitted or empty when applied_proposal is supplied — the proposal "
+            "params are used directly and this field is ignored."
+        ),
+    )
+    applied_proposal: Optional[dict] = Field(
+        None,
+        description=(
+            "Pre-structured override dict from a validated constraint-resolution proposal "
+            "(the 'params' dict from a /plan proposals entry, merged with its fix_type). "
+            "When present, _parse_overrides() is skipped entirely — zero extra LLM calls. "
+            "The same per-type validation as the free-text path is applied before the plan runs."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def require_text_or_proposal(self) -> "ReplanRequest":
+        """Ensure the request carries either free text or a pre-parsed proposal.
+        An empty user_request_text is only valid when applied_proposal is provided."""
+        if self.applied_proposal is None and not self.user_request_text.strip():
+            raise ValueError(
+                "user_request_text must be non-empty when applied_proposal is not provided."
+            )
+        return self
 
 
 class MissionCostRequest(BaseModel):
@@ -556,9 +583,13 @@ def debris_removal_methods(norad_id: int):
     return response
 
 
-def _run_plan(req: PlanRequest) -> dict[str, Any]:
+def _run_plan(req: PlanRequest, *, time_limit_seconds: Optional[int] = None) -> dict[str, Any]:
     """Execute the full plan pipeline for a PlanRequest and return the result dict.
-    Shared by /plan and /replan so both endpoints stay in sync."""
+    Shared by /plan and /replan so both endpoints stay in sync.
+
+    time_limit_seconds: when set, overrides SOLVER_TIME_LIMIT_SECONDS for the
+    optimize_route() call.  Used by _dry_run_plan() to pass DRY_RUN_TIME_LIMIT_SECONDS
+    so feasibility checks complete in ~1s instead of the full 5s budget."""
     scored = _get_scored_field(weights=req.weights)
     if not scored:
         raise HTTPException(status_code=502, detail="Debris field empty -- Celestrak fetch may have failed")
@@ -608,6 +639,9 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
         if not any(o["norad_id"] == req.target_norad_id for o in pool):
             pool = pool + [target_obj]  # guarantee consideration; still not a forced visit
 
+    opt_kwargs: dict[str, Any] = {}
+    if time_limit_seconds is not None:
+        opt_kwargs["time_limit_seconds"] = time_limit_seconds
     result = optimize_route(
         pool,
         fuel_budget_km_s=req.fuel_budget_km_s,
@@ -615,6 +649,7 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
         start_inclination_deg=req.start_inclination_deg,
         start_raan_deg=req.start_raan_deg,
         nets_carried=req.nets_carried,
+        **opt_kwargs,
     )
 
     if "error" in result:
@@ -650,6 +685,289 @@ def _run_plan(req: PlanRequest) -> dict[str, Any]:
     return result
 
 
+def _dry_run_plan(req: PlanRequest) -> dict[str, Any]:
+    """Run the plan pipeline with a short time limit to confirm feasibility only.
+
+    Used exclusively by the dry-run validation layer inside _propose_fixes() to
+    check whether a proposed fix would yield visited_count > 0.  The 1 s limit
+    (DRY_RUN_TIME_LIMIT_SECONDS) is enough for OR-Tools to find any feasible
+    solution — it does not need to find the optimal route, just confirm one exists.
+    Never raises: returns the result dict (possibly visited_count == 0) or
+    {"visited_count": 0, "dry_run_error": str(exc)} on unexpected failure."""
+    try:
+        return _run_plan(req, time_limit_seconds=DRY_RUN_TIME_LIMIT_SECONDS)
+    except Exception as exc:
+        logger.warning("[dry_run_plan] unexpected error: %s", exc)
+        return {"visited_count": 0, "dry_run_error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Agentic Constraint Resolution helpers
+# ---------------------------------------------------------------------------
+
+# Allowlist of fix_types the LLM is permitted to propose.  Any value outside
+# this set is silently dropped at Layer 2 so hallucinated types never reach
+# the client.
+_VALID_FIX_TYPES = {"budget_increase", "pool_size_increase", "altitude_expand", "method_filter_change"}
+
+# Required params key per fix_type (Layer 2 structural check).
+_FIX_TYPE_PARAMS_KEY: dict[str, str] = {
+    "budget_increase":      "new_budget",
+    "pool_size_increase":   "new_pool_size",
+    "altitude_expand":      "altitude_km",
+    "method_filter_change": "removal_method",
+}
+
+# Valid method values for method_filter_change (Layer 3 bounds check).
+_VALID_PROPOSAL_METHODS = {"net_capture", "robotic_arm_or_net_capture"}
+
+# Timeout budget for the entire _propose_fixes call (LLM + validation).
+_PROPOSE_FIXES_TIMEOUT = 3.0  # seconds
+
+
+def _validate_proposals(raw_proposals: list[Any]) -> list[dict[str, Any]]:
+    """Layer 2 + Layer 3 validation.  Drop (and log) any proposal that fails
+    either structural or bounds checks.  Never raises."""
+    _required_fields = {"proposal", "reason", "fix_type", "params", "estimated_impact"}
+    validated: list[dict[str, Any]] = []
+
+    for raw in raw_proposals:
+        # Layer 2 — structural
+        if not isinstance(raw, dict):
+            logger.warning("[propose_fixes] rejected non-dict proposal: %r", raw)
+            continue
+        missing = _required_fields - raw.keys()
+        if missing:
+            logger.warning("[propose_fixes] rejected proposal missing fields %s: %r", missing, raw)
+            continue
+        fix_type = raw.get("fix_type")
+        if fix_type not in _VALID_FIX_TYPES:
+            logger.warning("[propose_fixes] rejected proposal with unknown fix_type %r: %r", fix_type, raw)
+            continue
+        params = raw.get("params")
+        if not isinstance(params, dict):
+            logger.warning("[propose_fixes] rejected proposal with non-dict params: %r", raw)
+            continue
+        required_param_key = _FIX_TYPE_PARAMS_KEY[fix_type]
+        if required_param_key not in params:
+            logger.warning(
+                "[propose_fixes] rejected proposal: fix_type=%r requires params.%s, not found: %r",
+                fix_type, required_param_key, raw,
+            )
+            continue
+
+        # Layer 3 — bounds per fix_type
+        try:
+            if fix_type == "budget_increase":
+                v = float(params["new_budget"])
+                if not (0.5 <= v <= 50):
+                    raise ValueError(f"new_budget {v} outside [0.5, 50]")
+            elif fix_type == "pool_size_increase":
+                v = int(params["new_pool_size"])
+                if not (5 <= v <= 300):
+                    raise ValueError(f"new_pool_size {v} outside [5, 300]")
+            elif fix_type == "altitude_expand":
+                v = float(params["altitude_km"])
+                if not (500 <= v <= 2000):
+                    raise ValueError(f"altitude_km {v} outside [500, 2000]")
+            elif fix_type == "method_filter_change":
+                m = params["removal_method"]
+                if m not in _VALID_PROPOSAL_METHODS:
+                    raise ValueError(f"removal_method {m!r} not in {_VALID_PROPOSAL_METHODS}")
+        except (ValueError, TypeError) as bounds_err:
+            logger.warning("[propose_fixes] rejected out-of-bounds proposal (%s): %r", bounds_err, raw)
+            continue
+
+        validated.append(raw)
+
+    return validated
+
+
+def _build_dry_run_req(req: PlanRequest, proposal: dict[str, Any]) -> Optional[PlanRequest]:
+    """Translate a validated proposal's params into a PlanRequest for dry-run.
+
+    Returns None for fix_types that cannot meaningfully be expressed as a
+    PlanRequest override (currently none — all four map cleanly), or if the
+    constructed request would be invalid.  Callers must treat None as
+    "skip dry-run for this proposal"."""
+    fix_type = proposal.get("fix_type")
+    params   = proposal.get("params", {})
+    try:
+        base = req.model_dump()
+        base.pop("user_request_text", None)
+        base.pop("applied_proposal", None)
+
+        if fix_type == "budget_increase":
+            base["fuel_budget_km_s"] = float(params["new_budget"])
+        elif fix_type == "pool_size_increase":
+            base["pool_size"] = int(params["new_pool_size"])
+        elif fix_type == "altitude_expand":
+            base["start_altitude_km"] = float(params["altitude_km"])
+        elif fix_type == "method_filter_change":
+            base["removal_method_filter"] = params["removal_method"]
+        else:
+            return None
+
+        return PlanRequest(**base)
+    except Exception as exc:
+        logger.warning("[dry_run] could not build PlanRequest for %r: %s", fix_type, exc)
+        return None
+
+
+def _propose_fixes(route_result: dict[str, Any], req: PlanRequest) -> list[dict[str, Any]]:
+    """Call llama-3.1-8b-instant to propose 2-3 concrete fixes for a failed plan
+    (visited_count == 0).
+
+    Pipeline:
+      1. Ask the LLM for candidate proposals (with a short timeout).
+      2. Validate them (Layer 2 structural + Layer 3 bounds).
+      3. Dry-run each validated proposal concurrently with a 1 s OR-Tools limit
+         to confirm the fix actually yields visited_count > 0 before showing it
+         to the user.  Proposals whose dry-run visits 0 objects are dropped.
+
+    Returns only proposals confirmed feasible by the dry-run, or [] on any
+    failure (timeout, bad JSON, Groq error, zero surviving proposals).
+    Never raises — the route result is always returned regardless."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    result_holder: list[list[dict[str, Any]]] = [[]]
+
+    def _run() -> None:
+        min_hop   = route_result.get("min_depot_hop_km_s", "unknown")
+        pool_size = route_result.get("pool_size_used", req.pool_size)
+        budget    = req.fuel_budget_km_s
+        weights   = req.weights or DEFAULT_WEIGHTS
+        rmf       = req.removal_method_filter
+
+        prompt = (
+            "You are a constraint-resolution assistant for an orbital debris removal mission planner. "
+            "A route-planning run just failed: the optimizer visited ZERO debris objects because the "
+            "mission constraints are too tight for any feasible hop.\n\n"
+            "Failed run metadata:\n"
+            f"  fuel_budget_km_s          = {budget}  (total delta-v budget)\n"
+            f"  cheapest_depot_hop_km_s   = {min_hop}  (minimum delta-v cost to reach any object)\n"
+            f"  pool_size                 = {pool_size}  (number of candidate objects considered)\n"
+            f"  weights.proximity         = {weights.get('proximity', DEFAULT_WEIGHTS['proximity'])}\n"
+            f"  weights.lifetime          = {weights.get('lifetime',  DEFAULT_WEIGHTS['lifetime'])}\n"
+            f"  weights.size              = {weights.get('size',      DEFAULT_WEIGHTS['size'])}\n"
+            f"  removal_method_filter     = {rmf!r}  (null means no filter / mixed methods)\n\n"
+            "Propose 2-3 concrete fixes the operator can apply to make the route feasible. "
+            "Each fix must address the root cause shown in the metadata above.\n\n"
+            "ALLOWED fix_type values (use EXACTLY one of these four strings, nothing else):\n"
+            '  "budget_increase"      — raise fuel_budget_km_s so it exceeds cheapest_depot_hop_km_s\n'
+            '  "pool_size_increase"   — enlarge the candidate pool so cheaper objects become reachable\n'
+            '  "altitude_expand"      — reposition the spacecraft/depot launch altitude (altitude_km) to\n'
+            "                           reduce the first-hop delta-v cost; this does NOT add new debris\n"
+            "                           objects to the pool — it moves the depot closer to existing ones.\n"
+            '                           reason must describe reducing first-hop cost, NOT pool size change.\n'
+            '  "method_filter_change" — relax or change the removal_method_filter to open more targets\n\n'
+            "NUMERIC BOUNDS (your proposed values must stay within these ranges):\n"
+            "  budget_increase:      0.5 <= new_budget <= 50        (km/s)\n"
+            "  pool_size_increase:   5 <= new_pool_size <= 300       (objects)\n"
+            "  altitude_expand:      500 <= altitude_km <= 2000      (km)\n"
+            "  method_filter_change: removal_method must be exactly one of: "
+            '"net_capture", "robotic_arm_or_net_capture"\n\n'
+            "DO NOT invent fix_types not in the list above (e.g. do NOT use "
+            '"inclination_change", "weight_adjust", "debris_selection", or any other string). '
+            "DO NOT invent removal_method values not in the allowed list above "
+            '(e.g. do NOT use "laser_ablation", "harpoon_capture", "ion_beam", "electrodynamic_tether"). '
+            "DO NOT propose values outside the numeric bounds above (e.g. do NOT set new_budget=200).\n"
+            'For altitude_expand, the reason MUST describe repositioning the spacecraft/depot altitude to '
+            "lower the first-hop transit cost — do NOT mention pool size, number of objects, or debris "
+            "coverage area changing.\n\n"
+            "Respond with ONLY a JSON object (no prose, no markdown) in this exact shape:\n"
+            '{"proposals": [\n'
+            '  {\n'
+            '    "proposal": "<one sentence describing the fix>",\n'
+            '    "reason": "<one sentence explaining why this unblocks the route>",\n'
+            '    "fix_type": "<one of the four allowed fix_type strings>",\n'
+            '    "params": {"<key>": <value>},\n'
+            '    "estimated_impact": "<one sentence on expected improvement>"\n'
+            '  }\n'
+            "]}"
+        )
+
+        try:
+            resp = _groq_client().chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0,
+                timeout=_PROPOSE_FIXES_TIMEOUT,
+            )
+            raw_text = resp.choices[0].message.content or ""
+            logger.debug("[propose_fixes] raw LLM response: %r", raw_text)
+            parsed = json.loads(raw_text)
+            raw_proposals = parsed.get("proposals", [])
+            if not isinstance(raw_proposals, list):
+                logger.warning("[propose_fixes] 'proposals' is not a list: %r", raw_proposals)
+                result_holder[0] = []
+                return
+
+            validated = _validate_proposals(raw_proposals)
+            if not validated:
+                result_holder[0] = []
+                return
+
+            # ------------------------------------------------------------------
+            # Dry-run validation: run all candidates concurrently with a 1 s
+            # time limit each.  Total wall time ≈ max(individual dry-run) not
+            # sum — typically ~1 s for the slowest candidate.
+            # ------------------------------------------------------------------
+            dry_run_reqs: list[Optional[PlanRequest]] = [
+                _build_dry_run_req(req, p) for p in validated
+            ]
+
+            confirmed: list[dict[str, Any]] = []
+
+            def _run_dry(idx: int) -> tuple[int, int]:
+                """Returns (proposal_index, visited_count)."""
+                dr = dry_run_reqs[idx]
+                if dr is None:
+                    return idx, 0
+                result = _dry_run_plan(dr)
+                return idx, result.get("visited_count", 0)
+
+            with ThreadPoolExecutor(max_workers=len(validated)) as pool:
+                futures = {pool.submit(_run_dry, i): i for i in range(len(validated))}
+                for future in as_completed(futures):
+                    try:
+                        idx, visited = future.result()
+                        if visited > 0:
+                            confirmed.append(validated[idx])
+                        else:
+                            logger.debug(
+                                "[propose_fixes] dry-run: fix_type=%r visited=0 — dropped",
+                                validated[idx].get("fix_type"),
+                            )
+                    except Exception as exc:
+                        logger.warning("[propose_fixes] dry-run future error: %s", exc)
+
+            # Restore original proposal order (as_completed is unordered).
+            order = {id(p): i for i, p in enumerate(validated)}
+            confirmed.sort(key=lambda p: order.get(id(p), 999))
+
+            result_holder[0] = confirmed
+
+        except Exception as exc:
+            logger.warning("[propose_fixes] failed (%s: %s) — returning empty proposals", type(exc).__name__, exc)
+            result_holder[0] = []
+
+    # Run the LLM call + dry-run block in a daemon thread.
+    # Timeout budget: LLM (3 s) + dry-run (1 s per candidate, concurrent) + margin.
+    # Max_workers caps the thread count so we don't spawn unbounded threads on
+    # a large proposal list.
+    _TOTAL_TIMEOUT = _PROPOSE_FIXES_TIMEOUT + DRY_RUN_TIME_LIMIT_SECONDS + 2.0
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=_TOTAL_TIMEOUT)
+    if t.is_alive():
+        logger.warning("[propose_fixes] thread still running after %.1fs — returning empty proposals", _TOTAL_TIMEOUT)
+        return []
+    return result_holder[0]
+
+
 @app.post("/plan")
 def plan(req: PlanRequest):
     """Risk-ranked pool -> orienteering optimizer -> route + reasoning-ready breakdown."""
@@ -661,6 +979,8 @@ def plan(req: PlanRequest):
             "Mission briefing generation failed or was rate-limited. "
             "Route data above is valid; retry to get a narrated briefing."
         )
+    if result.get("visited_count") == 0:
+        result["proposals"] = _propose_fixes(result, req)
     return result
 
 
@@ -835,21 +1155,34 @@ def _explain_removal_method(
 
 
 def _parse_overrides(user_text: str, req: "PlanRequest") -> dict[str, Any]:
-    """Call llama-3.1-8b-instant in json_object mode to extract parameter overrides."""
+    """Call llama-3.1-8b-instant in json_object mode to extract parameter overrides.
+
+    Retries once on malformed JSON (model occasionally emits a broken fragment
+    on the first token; a second call with the same prompt almost always fixes it).
+    Raises ValueError on two consecutive failures so the caller can surface a 502."""
     system_prompt = _build_parse_prompt(req)
-    resp = _groq_client().chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_text},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0,
-    )
-    last_raw = resp.choices[0].message.content or ""
-    logger.debug("[_parse_overrides] raw LLM response: %r", last_raw)
-    raw = json.loads(last_raw)
-    return {k: v for k, v in raw.items() if k in _ALLOWED_OVERRIDE_KEYS}
+    client = _groq_client()
+    last_raw = ""
+    for attempt in range(2):
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_text},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        last_raw = resp.choices[0].message.content or ""
+        logger.debug("[_parse_overrides] attempt=%d raw LLM response: %r", attempt, last_raw)
+        try:
+            raw = json.loads(last_raw)
+            return {k: v for k, v in raw.items() if k in _ALLOWED_OVERRIDE_KEYS}
+        except json.JSONDecodeError:
+            if attempt == 0:
+                logger.warning("[_parse_overrides] malformed JSON on attempt 0 — retrying")
+                continue
+    raise ValueError(f"malformed JSON after retry: {last_raw!r}")
 
 
 def _explain_diff(diff: dict[str, Any]) -> str:
@@ -928,49 +1261,25 @@ def _norad_ids_from_plan(plan_result: dict[str, Any]) -> set[int]:
     return ids
 
 
-@app.post("/replan")
-def replan(req: ReplanRequest):
-    """Parse user_request_text into parameter overrides, re-run the plan,
-    diff old vs new, and return a plain-language explanation. Stateless."""
+def _execute_overrides(req: PlanRequest, raw_overrides: dict) -> dict:
+    """Steps 3–7 of the replan pipeline: validate raw_overrides, compute old/new
+    plans, diff, explain, and return the assembled response dict.
 
-    # ------------------------------------------------------------------ #
-    # Step 1 -- parse overrides from natural language via small LLM       #
-    # ------------------------------------------------------------------ #
-    try:
-        parsed = _parse_overrides(req.user_request_text, req)
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    Called by /replan in two ways:
+      1. Free-text path  — raw_overrides came from _parse_overrides().
+      2. Proposal path   — raw_overrides is req.applied_proposal (pre-structured
+                           params from a validated proposal, bypassing LLM parse).
 
-    # ------------------------------------------------------------------ #
-    # Step 2 -- if LLM found nothing, return original plan unchanged      #
-    # ------------------------------------------------------------------ #
-    if not parsed or parsed.get("no_changes"):
-        original_plan = _run_plan(req)
-        original_plan["explanation"] = _explain_plan(original_plan)
-        return {
-            "old_plan": original_plan,
-            "new_plan": original_plan,
-            "diff": {
-                "added": [],
-                "dropped": [],
-                "fuel_delta_km_s": 0.0,
-                "risk_delta": 0.0,
-                "budget_used_delta": 0.0,
-            },
-            "explanation": (
-                "No recognised parameter changes were found in your request. "
-                "The plan is returned unchanged."
-            ),
-            "overrides_applied": {},
-        }
+    Both paths go through the exact same per-type validation so there is no
+    separate weaker path for the proposal shortcut."""
 
     # ------------------------------------------------------------------ #
     # Step 3 -- validate overrides before touching the optimizer          #
     # ------------------------------------------------------------------ #
     overrides: dict[str, Any] = {}
 
-    if "fuel_budget_km_s" in parsed:
-        v = float(parsed["fuel_budget_km_s"])
+    if "fuel_budget_km_s" in raw_overrides:
+        v = float(raw_overrides["fuel_budget_km_s"])
         if v <= 0:
             raise HTTPException(status_code=422, detail="fuel_budget_km_s must be > 0")
         # optimizer.py converts the budget to an integer via
@@ -989,9 +1298,9 @@ def replan(req: ReplanRequest):
             )
         overrides["fuel_budget_km_s"] = v
 
-    if "weights" in parsed:
+    if "weights" in raw_overrides:
         base_weights = req.weights or DEFAULT_WEIGHTS
-        w_raw = parsed["weights"]
+        w_raw = raw_overrides["weights"]
         has_p = "proximity" in w_raw
         has_l = "lifetime"  in w_raw
         has_s = "size"      in w_raw
@@ -1012,8 +1321,8 @@ def replan(req: ReplanRequest):
                 p, l, s = DEFAULT_WEIGHTS["proximity"], DEFAULT_WEIGHTS["lifetime"], DEFAULT_WEIGHTS["size"]
         overrides["weights"] = {"proximity": round(p, 6), "lifetime": round(l, 6), "size": round(s, 6)}
 
-    if "removal_method_filter" in parsed:
-        v = parsed["removal_method_filter"]
+    if "removal_method_filter" in raw_overrides:
+        v = raw_overrides["removal_method_filter"]
         if v is not None and v not in _VALID_REMOVAL_METHOD_FILTERS:
             raise HTTPException(
                 status_code=422,
@@ -1022,33 +1331,30 @@ def replan(req: ReplanRequest):
             )
         overrides["removal_method_filter"] = v  # None is a valid, meaningful override (clears the filter)
 
-    if "launch_site" in parsed:
-        v = parsed["launch_site"]
+    if "launch_site" in raw_overrides:
+        v = raw_overrides["launch_site"]
         if v is None:
-            # Explicit null from the LLM means "clear the site" — treat as
-            # no site on the new request (raw fields will carry through from
-            # model_dump since they're already resolved on req).
+            # Explicit null means "clear the site" — raw fields carry through
+            # from model_dump since they're already resolved on req.
             overrides["launch_site"] = None
         elif v in LAUNCH_SITES:
             # Known key — valid site change.
             overrides["launch_site"] = v
-            if "inclination_deg" in parsed:
-                overrides["inclination_deg"] = parsed["inclination_deg"]
+            if "inclination_deg" in raw_overrides:
+                overrides["inclination_deg"] = raw_overrides["inclination_deg"]
         else:
-            # Unknown key: LLM hallucinated or partially matched a location
-            # not in the five-site catalog.  Per design: silently ignore,
-            # leave start_position unchanged.  Do NOT raise 422 — this is
-            # unmatched user free text routed through the parser, not a
-            # malformed direct API call.
+            # Unknown key: silently ignore, leave start_position unchanged.
+            # Applies to the free-text path (LLM hallucination); the proposal
+            # path never emits launch_site, so this branch is unreachable there.
             logger.warning(
-                "[replan] launch_site from LLM %r is not in LAUNCH_SITES — ignoring",
+                "[replan] launch_site %r is not in LAUNCH_SITES — ignoring",
                 v,
             )
 
     # ------------------------------------------------------------------ #
     # Step 4 -- compute old plan (original params) and new plan (merged)  #
     # ------------------------------------------------------------------ #
-    logger.debug("[replan] req.model_dump() before old_plan: %s", req.model_dump())
+    logger.debug("[replan/_execute_overrides] req.model_dump() before old_plan: %s", req.model_dump())
     old_plan = _run_plan(req)
     # old_plan intentionally has no "explanation" key.
     # Design rationale: old_plan is being discarded; narrating it would cost an
@@ -1060,14 +1366,15 @@ def replan(req: ReplanRequest):
     new_req_data = req.model_dump()
     new_req_data.update(overrides)
     if "launch_site" in overrides:
-        # Intentional site change from the LLM parser: null out the already-
-        # resolved raw fields so the model_validator re-derives them from the
-        # new site key.  Without this the validator's idempotency guard would
-        # see the old populated values and skip re-resolution.
+        # Intentional site change: null out the already-resolved raw fields so
+        # the model_validator re-derives them from the new site key.  Without
+        # this the validator's idempotency guard would see the old populated
+        # values and skip re-resolution.
         new_req_data["start_altitude_km"]    = None
         new_req_data["start_inclination_deg"] = None
-    # ReplanRequest has user_request_text; PlanRequest doesn't -- strip it
+    # ReplanRequest has user_request_text / applied_proposal; PlanRequest doesn't — strip them
     new_req_data.pop("user_request_text", None)
+    new_req_data.pop("applied_proposal", None)
     new_req = PlanRequest(**new_req_data)
     new_plan = _run_plan(new_req)
 
@@ -1134,6 +1441,59 @@ def replan(req: ReplanRequest):
         "explanation":      explanation,
         "overrides_applied": overrides,
     }
+
+
+@app.post("/replan")
+def replan(req: ReplanRequest):
+    """Parse user_request_text into parameter overrides, re-run the plan,
+    diff old vs new, and return a plain-language explanation. Stateless.
+
+    Two entry paths:
+      • Free-text (req.applied_proposal is None): natural-language request is
+        parsed into raw_overrides by the small LLM, then passed to
+        _execute_overrides().
+      • Proposal shortcut (req.applied_proposal is not None): raw_overrides
+        come directly from the validated proposal params — _parse_overrides()
+        is never called, so this path costs zero extra LLM calls."""
+
+    # ------------------------------------------------------------------ #
+    # Proposal shortcut — skip LLM parse entirely                        #
+    # ------------------------------------------------------------------ #
+    if req.applied_proposal is not None:
+        return _execute_overrides(req, req.applied_proposal)
+
+    # ------------------------------------------------------------------ #
+    # Step 1 -- parse overrides from natural language via small LLM       #
+    # ------------------------------------------------------------------ #
+    try:
+        parsed = _parse_overrides(req.user_request_text, req)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    # ------------------------------------------------------------------ #
+    # Step 2 -- if LLM found nothing, return original plan unchanged      #
+    # ------------------------------------------------------------------ #
+    if not parsed or parsed.get("no_changes"):
+        original_plan = _run_plan(req)
+        original_plan["explanation"] = _explain_plan(original_plan)
+        return {
+            "old_plan": original_plan,
+            "new_plan": original_plan,
+            "diff": {
+                "added": [],
+                "dropped": [],
+                "fuel_delta_km_s": 0.0,
+                "risk_delta": 0.0,
+                "budget_used_delta": 0.0,
+            },
+            "explanation": (
+                "No recognised parameter changes were found in your request. "
+                "The plan is returned unchanged."
+            ),
+            "overrides_applied": {},
+        }
+
+    return _execute_overrides(req, parsed)
 
 
 @app.get("/naive-route")

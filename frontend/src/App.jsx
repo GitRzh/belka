@@ -79,7 +79,7 @@ function FilterDropup({ filter, onChange, onClose }) {
 
 // Render the full detail view for a single history entry.
 // Extracted so it can be used in Workspace without duplication.
-function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, replanning }) {
+function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, replanning, onApplyProposal }) {
   if (entry.status === 'running') {
     return <p className="history-summary" style={{ marginTop: 8 }}>Running…</p>
   }
@@ -132,12 +132,20 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                 ? 'Nearest-neighbor baseline (no AI optimization)'
                 : undefined
             }
+            proposals={activePlan?.proposals}
+            onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
+            submitting={replanning}
           />
         </div>
       ) : (
         <>
           {entry.status === 'done' && entry.kind === 'plan' && (
-            <ReasoningPanel plan={entry.result} />
+            <ReasoningPanel
+              plan={entry.result}
+              proposals={entry.result?.proposals}
+              onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
+              submitting={replanning}
+            />
           )}
           {entry.status === 'done' && entry.kind === 'replan' && (
             <div className="replan-result">
@@ -609,6 +617,34 @@ export default function App() {
     }
   }
 
+  // Apply a constraint-resolution proposal directly via the applied_proposal shortcut.
+  // Calls /replan with applied_proposal set to the proposal's params — no free-text
+  // LLM parse, zero extra LLM calls.  Re-renders the same entry as any other replan.
+  async function handleApplyProposal(baseEntry, proposal) {
+    setReplanning(true)
+    setFormError(null)
+    const id = baseEntry.id
+    const replanParams = {
+      ...baseEntry.params,
+      // applied_proposal carries the params dict from the validated proposal.
+      // user_request_text is intentionally omitted — the backend accepts an empty
+      // string when applied_proposal is present.
+      applied_proposal: proposal.params,
+    }
+    setHistory(h => h.map(e => e.id === id ? { ...e, status: 'running', result: null, error: null } : e))
+    try {
+      const result = await api.replan(replanParams)
+      setPlan(result.new_plan)
+      setRouteMode('ai')
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: replanParams, result, kind: 'replan' } : e))
+    } catch (err) {
+      setFormError(err.body?.detail || err.message)
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
+    } finally {
+      setReplanning(false)
+    }
+  }
+
   const focusButtonsDisabled = !activePlan || !(activePlan.visited_count > 0)
 
   // Stable #N assignment: entry number = 1-based index in history array (never renumbered)
@@ -1010,6 +1046,7 @@ export default function App() {
                     onToggleNaive={handleToggleNaive}
                     onEditSelection={handleEditSelection}
                     onReplan={handleWorkspaceReplan}
+                    onApplyProposal={handleApplyProposal}
                     replanning={replanning}
                   />
                 ) : (

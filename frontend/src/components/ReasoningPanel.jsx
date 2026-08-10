@@ -1,9 +1,21 @@
 // Handles the edge states called out in CHECKPOINT.txt:
 // - explanation_error -> plan still valid, show "explanation unavailable" inline
 // - warning -> surface it, don't drop it
+//
+// Props:
+//   plan               — the route result object from /plan or /replan new_plan
+//   explanationOverride — string that replaces plan.explanation when set
+//   proposals          — array of validated proposal objects from /plan (only
+//                        present when visited_count == 0 and at least one
+//                        proposal survived validation); omit or pass [] for
+//                        the normal (successful-plan) case
+//   onApplyProposal    — callback(proposal) invoked when the user clicks Apply
+//   submitting         — bool, disables buttons while a replan is in flight
 
-export default function ReasoningPanel({ plan, explanationOverride }) {
+export default function ReasoningPanel({ plan, explanationOverride, proposals, onApplyProposal, submitting }) {
   if (!plan) return null
+
+  const showProposals = Array.isArray(proposals) && proposals.length > 0
 
   return (
     <div className="reasoning">
@@ -67,6 +79,31 @@ export default function ReasoningPanel({ plan, explanationOverride }) {
             </tbody>
           </table>
         </details>
+      )}
+      {/* Proposal buttons — only rendered when visited_count == 0 AND the
+          backend returned at least one validated proposal. Each button fires
+          the Apply shortcut: POST /replan with applied_proposal, zero LLM parse. */}
+      {showProposals && (
+        <div className="proposals" style={{ marginTop: 12 }}>
+          <div className="working-sticky-label" style={{ marginBottom: 6 }}>Suggested fixes</div>
+          {proposals.map((p, i) => (
+            <div key={i} className="proposal-item" style={{ marginBottom: 8 }}>
+              <button
+                className="btn btn-proposal"
+                disabled={submitting}
+                onClick={() => onApplyProposal?.(p)}
+                style={{ width: '100%', textAlign: 'left', padding: '6px 10px' }}
+              >
+                <span style={{ fontWeight: 600, display: 'block', marginBottom: 2 }}>
+                  {p.proposal}
+                </span>
+                <span style={{ fontSize: 11, color: 'var(--color-muted, #57606a)' }}>
+                  {p.reason}
+                </span>
+              </button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )
