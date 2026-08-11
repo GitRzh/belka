@@ -1657,6 +1657,8 @@ def naive_route(
             # naive_route does not model RAAN drift -- the greedy walk uses static
             # fetch-time costs throughout, unlike optimizer.py's post-solve drift walk.
             "raan_drift_deg": 0.0,
+            # Shape parity with optimizer.py step dicts; drift wait is not modelled here.
+            "recommended_wait_days": 0,
         })
         # Advance elapsed time using the same heuristic constant optimizer.py uses,
         # so arrival_time_days is on the same scale across both routes.

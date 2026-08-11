@@ -60,7 +60,7 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
           <table className="manifest-table">
             <thead>
               <tr>
-                {['Leg', 'From', 'To', 'Δv (km/s)', 'Arrival (days)', 'RAAN drift (°)'].map((h) => (
+                {['Leg', 'From', 'To', 'Δv (km/s)', 'Arrival (days)', 'RAAN drift (°)', 'Wait (days)'].map((h) => (
                   <th key={h}>{h}</th>
                 ))}
               </tr>
@@ -74,6 +74,7 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
                   <td>{step.delta_v_km_s}</td>
                   <td>{step.arrival_time_days ?? '—'}</td>
                   <td>{step.raan_drift_deg ?? '—'}</td>
+                  <td>{step.recommended_wait_days ?? '—'}</td>
                 </tr>
               ))}
             </tbody>

@@ -21,7 +21,7 @@ Design:
   - Modelled as an open (one-way) trip: zero-cost virtual end node lets the
     route stop wherever's cheapest without a return-to-depot burn.
 """
-from typing import Any
+from typing import Any, Callable
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
@@ -72,6 +72,159 @@ def _build_depot_node(altitude_km: float, inclination_deg: float, raan_deg: floa
         "raan_deg": raan_deg,
         "risk_score": 0.0,
     }
+
+
+class _DriftWalkResult:
+    """Return value of _drift_walk; keeps the signature stable without a tuple."""
+    __slots__ = (
+        "step_breakdown",
+        "total_fuel",
+        "elapsed_days",
+        "arrival_time_per_i",
+        "trimmed_visited_indices",
+    )
+
+    def __init__(
+        self,
+        step_breakdown: list[dict],
+        total_fuel: float,
+        elapsed_days: float,
+        arrival_time_per_i: dict,
+        trimmed_visited_indices: list[int],
+    ) -> None:
+        self.step_breakdown = step_breakdown
+        self.total_fuel = total_fuel
+        self.elapsed_days = elapsed_days
+        self.arrival_time_per_i = arrival_time_per_i
+        self.trimmed_visited_indices = trimmed_visited_indices
+
+
+def _drift_walk(
+    nodes: list[dict],
+    visited_indices: list[int],
+    fuel_budget_km_s: float | None,
+    label_fn: Callable[[dict], str],
+    max_wait_days: float = 0.0,
+    min_saving_km_s: float = 0.0,
+) -> "_DriftWalkResult":
+    """Post-solve per-leg drift walk shared by optimize_route() and solve_forced_route().
+
+    For each leg in *visited_indices* (which are pool/target indices, mapping to
+    ``nodes[idx + 1]``):
+
+    1. Projects the target's RAAN forward by the current *elapsed_days*.
+    2. Recomputes the arc cost with the drifted RAAN.
+    3. Optional wait window (max_wait_days > 0): scans wait_days in
+       [0, max_wait_days] at 1-day resolution to find the wait that minimises
+       drifted_cost.  If the best wait reduces cost by at least *min_saving_km_s*,
+       it is recorded as ``recommended_wait_days`` in the step dict and added to
+       ``elapsed_days``.  This is purely advisory — it does NOT alter the arc cost
+       used for the budget gate or total_fuel; those still use the cost at
+       elapsed_days=0 wait (i.e. current arrival estimate).  With
+       ``max_wait_days=0.0`` (default) this branch is never entered, reproducing
+       today's exact behaviour byte-for-byte.
+    4. Budget gate (when fuel_budget_km_s is not None): stops and trims the walk
+       if drifted_cost > fuel_remaining.
+
+    Returns a _DriftWalkResult with:
+      step_breakdown            list of per-step dicts
+      total_fuel                sum of drifted costs for completed legs
+      elapsed_days              cumulative elapsed time after the walk
+      arrival_time_per_i        {visited_index: elapsed_days at arrival}
+      trimmed_visited_indices   visited_indices[:n_completed] (may be a copy of the
+                                input if no truncation occurred)
+    """
+    step_breakdown: list[dict] = []
+    arrival_time_per_i: dict[int, float] = {}
+    total_fuel = 0.0
+    elapsed_days = 0.0
+    fuel_remaining = fuel_budget_km_s  # None means no gate
+    truncated_at: int | None = None
+    prev_node_index = 0  # depot is always node 0
+
+    for step_i, visit_i in enumerate(visited_indices):
+        node_index = visit_i + 1
+        from_node = nodes[prev_node_index]
+        to_node = nodes[node_index]
+
+        # Snapshot elapsed time before any wait so arrival_time_days always
+        # reflects the pre-wait departure epoch (consistent with max_wait_days=0).
+        departure_days = elapsed_days
+
+        fetch_time_raan = to_node.get("raan_deg", 0.0)
+        drift = raan_drift_deg(
+            to_node["altitude_km"],
+            to_node.get("inclination_deg", 0.0),
+            elapsed_days,
+        )
+        projected_raan = fetch_time_raan + drift
+
+        drifted_cost = transfer_delta_v(
+            alt1_km=from_node["altitude_km"],
+            incl1_deg=from_node.get("inclination_deg", 0.0),
+            alt2_km=to_node["altitude_km"],
+            incl2_deg=to_node.get("inclination_deg", 0.0),
+            raan1_deg=from_node.get("raan_deg", 0.0),
+            raan2_deg=projected_raan,
+        )["delta_v_total_km_s"]
+
+        # Optional wait-window optimisation (no-op when max_wait_days == 0).
+        recommended_wait_days: int = 0
+        if max_wait_days > 0.0:
+            best_cost = drifted_cost
+            best_wait = 0
+            for wait_days in range(1, int(max_wait_days) + 1):
+                trial_drift = raan_drift_deg(
+                    to_node["altitude_km"],
+                    to_node.get("inclination_deg", 0.0),
+                    elapsed_days + wait_days,
+                )
+                trial_cost = transfer_delta_v(
+                    alt1_km=from_node["altitude_km"],
+                    incl1_deg=from_node.get("inclination_deg", 0.0),
+                    alt2_km=to_node["altitude_km"],
+                    incl2_deg=to_node.get("inclination_deg", 0.0),
+                    raan1_deg=from_node.get("raan_deg", 0.0),
+                    raan2_deg=fetch_time_raan + trial_drift,
+                )["delta_v_total_km_s"]
+                if trial_cost < best_cost:
+                    best_cost = trial_cost
+                    best_wait = wait_days
+            if best_wait > 0 and (drifted_cost - best_cost) >= min_saving_km_s:
+                recommended_wait_days = best_wait
+                elapsed_days += best_wait  # advisory: advance clock by wait
+
+        # Budget gate (only when a budget was supplied).
+        if fuel_remaining is not None and drifted_cost > fuel_remaining:
+            truncated_at = step_i
+            break
+
+        step: dict = {
+            "from": label_fn(from_node),
+            "to": label_fn(to_node),
+            "delta_v_km_s": round(drifted_cost, 4),
+            "arrival_time_days": round(departure_days, 4),
+            "raan_drift_deg": round(drift, 4),
+            "recommended_wait_days": recommended_wait_days,
+        }
+        step_breakdown.append(step)
+
+        total_fuel += drifted_cost
+        if fuel_remaining is not None:
+            fuel_remaining -= drifted_cost
+        elapsed_days += drifted_cost * TRANSFER_TIME_DAYS_PER_KM_S
+        arrival_time_per_i[visit_i] = elapsed_days
+        prev_node_index = node_index
+
+    trimmed = visited_indices[:truncated_at] if truncated_at is not None else list(visited_indices)
+    return _DriftWalkResult(
+        step_breakdown=step_breakdown,
+        total_fuel=total_fuel,
+        elapsed_days=elapsed_days,
+        arrival_time_per_i=arrival_time_per_i,
+        trimmed_visited_indices=trimmed,
+    )
+
 
 
 def optimize_route(
@@ -211,76 +364,26 @@ def optimize_route(
             return obj["name"]
         return f"{obj['name']} ({obj['norad_id']})"
 
-    # Per-step breakdown, walking depot -> visited nodes in solved order,
-    # applying J2 RAAN drift to each target's RAAN at the predicted arrival time.
-    #
+    # Per-step breakdown: J2 RAAN drift correction via shared _drift_walk helper.
     # Design: OR-Tools solved using the static (fetch-time) cost matrix -- we
-    # can't rebuild the matrix per-leg during solving. The drift correction
-    # happens here in post-solve: for each leg we (a) estimate arrival time from
-    # cumulative delta-v so far, (b) project the target's RAAN forward by that
-    # elapsed time, (c) recompute the actual arc cost with the drifted RAAN. If
-    # the drifted cost pushes the leg over the remaining fuel budget, it's marked
-    # unreachable and the walk stops -- same semantics as a hard budget overrun.
-    #
+    # can't rebuild the matrix per-leg during solving. _drift_walk does the
+    # post-solve per-leg correction: projects RAAN forward, recomputes arc cost,
+    # gates against the remaining budget, and optionally evaluates a wait window.
     # Uses node indices directly (already known from visited_pool_indices)
     # rather than nodes.index(obj) -- list.index() on dicts does a value
     # equality scan, which isn't a safe identity check if two objects ever
     # have identical field values.
-    step_breakdown: list[dict[str, Any]] = []
-    arrival_time_per_pool_i: dict[int, float] = {}  # pool_i -> cumulative days at arrival
-    total_fuel = 0.0
-    elapsed_days = 0.0
-    fuel_remaining = fuel_budget_km_s
-    prev_node_index = 0  # depot is always node 0
-    drift_truncated_at: int | None = None  # pool index where drift made leg unaffordable
+    walk = _drift_walk(
+        nodes=nodes,
+        visited_indices=visited_pool_indices,
+        fuel_budget_km_s=fuel_budget_km_s,
+        label_fn=_label,
+    )
 
-    for step_i, pool_i in enumerate(visited_pool_indices):
-        node_index = pool_i + 1
-        from_node = nodes[prev_node_index]
-        to_node   = nodes[node_index]
-
-        # Project the target's RAAN forward to predicted arrival time.
-        fetch_time_raan = to_node.get("raan_deg", 0.0)
-        drift = raan_drift_deg(to_node["altitude_km"], to_node.get("inclination_deg", 0.0), elapsed_days)
-        projected_raan = fetch_time_raan + drift
-
-        # Recompute arc cost with drifted RAAN.
-        drifted_cost = transfer_delta_v(
-            alt1_km=from_node["altitude_km"],
-            incl1_deg=from_node.get("inclination_deg", 0.0),
-            alt2_km=to_node["altitude_km"],
-            incl2_deg=to_node.get("inclination_deg", 0.0),
-            raan1_deg=from_node.get("raan_deg", 0.0),
-            raan2_deg=projected_raan,
-        )["delta_v_total_km_s"]
-
-        if drifted_cost > fuel_remaining:
-            # Drift-adjusted cost exceeds remaining budget -- stop the walk here.
-            # visited_objects/route_details will be truncated to only the steps
-            # that actually completed.
-            drift_truncated_at = step_i
-            break
-
-        step_breakdown.append({
-            "from": _label(from_node),
-            "to": _label(to_node),
-            "delta_v_km_s": round(drifted_cost, 4),
-            "arrival_time_days": round(elapsed_days, 4),
-            "raan_drift_deg": round(drift, 4),
-        })
-        total_fuel += drifted_cost
-        fuel_remaining -= drifted_cost
-        # Advance elapsed time by estimated transfer duration for this leg.
-        elapsed_days += drifted_cost * TRANSFER_TIME_DAYS_PER_KM_S
-        arrival_time_per_pool_i[pool_i] = elapsed_days
-        prev_node_index = node_index
-
-    # If drift truncated the walk, trim visited_objects to match completed steps.
-    if drift_truncated_at is not None:
-        visited_pool_indices = visited_pool_indices[:drift_truncated_at]
-        visited_objects      = [pool[i] for i in visited_pool_indices]
-        visited_index_set    = set(visited_pool_indices)
-        skipped_objects      = [obj for i, obj in enumerate(pool) if i not in visited_index_set]
+    visited_pool_indices = walk.trimmed_visited_indices
+    visited_objects      = [pool[i] for i in visited_pool_indices]
+    visited_index_set    = set(visited_pool_indices)
+    skipped_objects      = [obj for i, obj in enumerate(pool) if i not in visited_index_set]
 
     # route_details: full per-object detail in solved visit order.
     # object_type/removal_method are additive fields from
@@ -298,7 +401,7 @@ def optimize_route(
             "method_maturity": o.get("method_maturity", {}),
             "removal_method_explanation": o.get("removal_method_explanation", ""),
             "risk_score": round(o.get("risk_score", 0.0), 4),
-            "arrival_time_days": round(arrival_time_per_pool_i.get(pool_i, 0.0), 4),
+            "arrival_time_days": round(walk.arrival_time_per_i.get(pool_i, 0.0), 4),
         }
         for pool_i, o in zip(visited_pool_indices, visited_objects)
     ]
@@ -309,11 +412,11 @@ def optimize_route(
         "visited_count": len(visited_objects),
         "skipped_count": len(skipped_objects),
         "skipped_names": [_label(o) for o in skipped_objects],
-        "total_fuel_cost_km_s": round(total_fuel, 4),
+        "total_fuel_cost_km_s": round(walk.total_fuel, 4),
         "fuel_budget_km_s": fuel_budget_km_s,
-        "fuel_used_fraction": round(total_fuel / fuel_budget_km_s, 4) if fuel_budget_km_s > 0 else 0.0,
+        "fuel_used_fraction": round(walk.total_fuel / fuel_budget_km_s, 4) if fuel_budget_km_s > 0 else 0.0,
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
-        "step_breakdown": step_breakdown,
+        "step_breakdown": walk.step_breakdown,
         "net_capacity_constrained": nets_carried,
         "min_depot_hop_km_s": round(min(matrix[0][1:]), 4) if len(pool) > 0 else 0.0,
     }
@@ -324,6 +427,7 @@ def solve_forced_route(
     start_altitude_km: float,
     start_inclination_deg: float,
     start_raan_deg: float = 0.0,
+    fuel_budget_km_s: float | None = None,
 ) -> dict[str, Any]:
     """
     Forced-visit TSP: every object in `targets` MUST be visited.
@@ -331,17 +435,29 @@ def solve_forced_route(
     Semantics differ from optimize_route() deliberately:
     - No pool, no pool_size, no AddDisjunction — every supplied node is
       mandatory.
-    - No fuel-budget dimension — the purpose is to compute the required fuel,
-      not gate against a budget the caller may not have set.
+    - No fuel-budget dimension in the OR-Tools solve — the purpose is to
+      compute the required fuel, not gate against a budget the caller may
+      not have set.
     - Net-capacity dimension cap is set dynamically to the count of
       net_capture targets in `targets`, guaranteeing feasibility regardless
       of how many nets the user's selection requires.
     - Minimises total route delta-v (same scaled cost matrix as the
       orienteering solver, same OR-Tools machinery).
 
+    Optional fuel_budget_km_s:
+        None (default) — today's behaviour, no budget gate applied.
+        float          — tracks fuel_remaining during the post-solve drift
+                         walk; stops and trims visited_target_indices when
+                         drifted_cost > fuel_remaining (same condition as
+                         optimize_route).  nets_carried_required and warning
+                         are still computed from the full original target
+                         list, not the trimmed walk — they are a hardware-
+                         requirement signal, not a budget-affordability check.
+
     Returns a dict shaped to mirror optimize_route()'s output for the fields
     that exist in this context, plus:
         nets_carried_required  int   — net_capture targets in the selection.
+        fuel_budget_km_s       float — echoed when caller supplied it.
         warning                str   — present only when nets_carried_required > 1,
                                        noting it exceeds RemoveDEBRIS's single-net
                                        flight history (informational, not a rejection).
@@ -427,44 +543,15 @@ def solve_forced_route(
             return obj["name"]
         return f"{obj['name']} ({obj['norad_id']})"
 
-    # Post-solve per-step breakdown with J2 RAAN drift correction,
-    # same logic as optimize_route().
-    step_breakdown: list[dict[str, Any]] = []
-    arrival_time_per_target_i: dict[int, float] = {}
-    total_fuel = 0.0
-    elapsed_days = 0.0
-    prev_node_index = 0
+    # Post-solve per-step breakdown via shared _drift_walk helper.
+    walk = _drift_walk(
+        nodes=nodes,
+        visited_indices=visited_target_indices,
+        fuel_budget_km_s=fuel_budget_km_s,
+        label_fn=_label,
+    )
 
-    for target_i in visited_target_indices:
-        node_index = target_i + 1
-        from_node = nodes[prev_node_index]
-        to_node = nodes[node_index]
-
-        fetch_time_raan = to_node.get("raan_deg", 0.0)
-        drift = raan_drift_deg(to_node["altitude_km"], to_node.get("inclination_deg", 0.0), elapsed_days)
-        projected_raan = fetch_time_raan + drift
-
-        drifted_cost = transfer_delta_v(
-            alt1_km=from_node["altitude_km"],
-            incl1_deg=from_node.get("inclination_deg", 0.0),
-            alt2_km=to_node["altitude_km"],
-            incl2_deg=to_node.get("inclination_deg", 0.0),
-            raan1_deg=from_node.get("raan_deg", 0.0),
-            raan2_deg=projected_raan,
-        )["delta_v_total_km_s"]
-
-        step_breakdown.append({
-            "from": _label(from_node),
-            "to": _label(to_node),
-            "delta_v_km_s": round(drifted_cost, 4),
-            "arrival_time_days": round(elapsed_days, 4),
-            "raan_drift_deg": round(drift, 4),
-        })
-        total_fuel += drifted_cost
-        elapsed_days += drifted_cost * TRANSFER_TIME_DAYS_PER_KM_S
-        arrival_time_per_target_i[target_i] = elapsed_days
-        prev_node_index = node_index
-
+    visited_target_indices = walk.trimmed_visited_indices
     visited_objects = [targets[i] for i in visited_target_indices]
 
     route_details = [
@@ -477,7 +564,7 @@ def solve_forced_route(
             "method_maturity": o.get("method_maturity", {}),
             "removal_method_explanation": o.get("removal_method_explanation", ""),
             "risk_score": round(o.get("risk_score", 0.0), 4),
-            "arrival_time_days": round(arrival_time_per_target_i.get(target_i, 0.0), 4),
+            "arrival_time_days": round(walk.arrival_time_per_i.get(target_i, 0.0), 4),
         }
         for target_i, o in zip(visited_target_indices, visited_objects)
     ]
@@ -486,11 +573,14 @@ def solve_forced_route(
         "route": [_label(o) for o in visited_objects],
         "route_details": route_details,
         "visited_count": len(visited_objects),
-        "total_fuel_cost_km_s": round(total_fuel, 4),
+        "total_fuel_cost_km_s": round(walk.total_fuel, 4),
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
-        "step_breakdown": step_breakdown,
+        "step_breakdown": walk.step_breakdown,
         "nets_carried_required": nets_carried_required,
     }
+
+    if fuel_budget_km_s is not None:
+        result["fuel_budget_km_s"] = fuel_budget_km_s
 
     if nets_carried_required > 1:
         result["warning"] = (

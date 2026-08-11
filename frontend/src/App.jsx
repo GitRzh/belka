@@ -218,7 +218,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                   <table className="manifest-table">
                     <thead>
                       <tr>
-                        {['Leg', 'From', 'To', 'Δv (km/s)', 'Arrival (days)'].map((h) => (
+                        {['Leg', 'From', 'To', 'Δv (km/s)', 'Arrival (days)', 'RAAN drift (°)', 'Wait (days)'].map((h) => (
                           <th key={h}>{h}</th>
                         ))}
                       </tr>
@@ -231,6 +231,8 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                           <td>{step.to}</td>
                           <td>{step.delta_v_km_s}</td>
                           <td>{step.arrival_time_days ?? '—'}</td>
+                          <td>{step.raan_drift_deg ?? '—'}</td>
+                          <td>{step.recommended_wait_days ?? '—'}</td>
                         </tr>
                       ))}
                     </tbody>
