@@ -40,6 +40,12 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
         <dd>
           {plan.total_fuel_cost_km_s} / {plan.fuel_budget_km_s} km/s ({Math.round((plan.fuel_used_fraction ?? 0) * 100)}%)
         </dd>
+        {plan.total_fuel_saved_km_s > 0 && (
+          <>
+            <dt>Fuel saved by waiting</dt>
+            <dd>{plan.total_fuel_saved_km_s} km/s</dd>
+          </>
+        )}
         <dt>Risk score collected</dt>
         <dd>{plan.total_risk_collected}</dd>
         {plan.skipped_count > 0 && (

@@ -207,6 +207,12 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                 <dd>{entry.result.visited_count}</dd>
                 <dt>Fuel required</dt>
                 <dd>{entry.result.total_fuel_cost_km_s} km/s</dd>
+                {entry.result.total_fuel_saved_km_s > 0 && (
+                  <>
+                    <dt>Fuel saved by waiting</dt>
+                    <dd>{entry.result.total_fuel_saved_km_s} km/s</dd>
+                  </>
+                )}
                 <dt>Risk collected</dt>
                 <dd>{entry.result.total_risk_collected}</dd>
                 <dt>Nets required</dt>
@@ -427,7 +433,7 @@ export default function App() {
     setHistory(h => h.map(e => e.id === id ? { ...e, status: 'running', result: null, error: null } : e))
 
     try {
-      const baseParams = buildMissionCostPayload(baseEntry.startParams, baseEntry.targetNoradIds)
+      const baseParams = buildMissionCostPayload(baseEntry.startParams, baseEntry.targetNoradIds, baseEntry.maxWaitDays)
       const syntheticParams = { ...baseParams, fuel_budget_km_s: 1.0 }
       const replanResult = await api.replan({
         ...syntheticParams,
@@ -451,7 +457,7 @@ export default function App() {
       }
 
       const newStartParams = mergeStartOverrides(baseEntry.startParams, startOverrides)
-      const newPayload = buildMissionCostPayload(newStartParams, baseEntry.targetNoradIds)
+      const newPayload = buildMissionCostPayload(newStartParams, baseEntry.targetNoradIds, baseEntry.maxWaitDays)
       const costResult = await api.missionCost(newPayload)
 
       setHistory(h => h.map(e => e.id === id ? {
@@ -472,7 +478,7 @@ export default function App() {
     }
   }
 
-  function buildMissionCostPayload(startParams, targetNoradIds) {
+  function buildMissionCostPayload(startParams, targetNoradIds, maxWaitDays) {
     const payload = { target_norad_ids: targetNoradIds }
     if (startParams.mode === 'site') {
       payload.launch_site = startParams.launch_site
@@ -486,6 +492,7 @@ export default function App() {
         payload.start_raan_deg = Number(startParams.start_raan_deg)
       }
     }
+    if (maxWaitDays != null && maxWaitDays !== '') payload.max_wait_days = Number(maxWaitDays)
     return payload
   }
 
@@ -586,17 +593,18 @@ export default function App() {
     })
   }
 
-  function handleConfirmMissionCost(costResult, startParams, targetNoradIds) {
+  function handleConfirmMissionCost(costResult, startParams, targetNoradIds, maxWaitDays) {
     const id = crypto.randomUUID()
     setHistory(h => [...h, {
       id,
       kind: 'mission_cost',
       status: 'done',
-      params: buildMissionCostPayload(startParams, targetNoradIds),
+      params: buildMissionCostPayload(startParams, targetNoradIds, maxWaitDays),
       result: costResult,
       error: null,
       targetNoradIds,
       startParams,
+      maxWaitDays: maxWaitDays ?? '',
     }].slice(-MAX_HISTORY))
     setActiveWorkspaceId(id)
     setActivePanel('workspace')

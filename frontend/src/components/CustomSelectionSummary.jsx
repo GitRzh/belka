@@ -129,6 +129,12 @@ function MissionCostResult({ result }) {
         <dd>{result.visited_count}</dd>
         <dt>Fuel required</dt>
         <dd>{result.total_fuel_cost_km_s} km/s</dd>
+        {result.total_fuel_saved_km_s > 0 && (
+          <>
+            <dt>Fuel saved by waiting</dt>
+            <dd>{result.total_fuel_saved_km_s} km/s</dd>
+          </>
+        )}
         <dt>Risk collected</dt>
         <dd>{result.total_risk_collected}</dd>
         <dt>Nets required</dt>
@@ -194,8 +200,8 @@ const EMPTY_START = {
 //   selectedIds        — Set<number> of currently selected NORAD IDs
 //   onRemoveItem(id)   — remove one item from the selection
 //   onClose()          — cancel & clear selection entirely
-//   onConfirm(result, startParams, targetNoradIds)
-//                      — user confirmed; push to history
+//   onConfirm(result, startParams, targetNoradIds, maxWaitDays)
+//                      — user confirmed; push to history; maxWaitDays is '' or a numeric string
 //   prefilledStart     — optional: { mode, ... } for Edit Selection; null = fresh
 export default function CustomSelectionSummary({
   debrisField,
@@ -213,6 +219,7 @@ export default function CustomSelectionSummary({
 
   // Start-position form state — reset to empty for fresh entry, pre-fill for Edit Selection
   const [startParams, setStartParams] = useState(prefilledStart ?? EMPTY_START)
+  const [maxWaitDays, setMaxWaitDays] = useState('')
 
   // Compute state
   const [computing, setComputing] = useState(false)
@@ -282,6 +289,7 @@ export default function CustomSelectionSummary({
         payload.start_raan_deg = Number(startParams.start_raan_deg)
       }
     }
+    if (maxWaitDays !== '') payload.max_wait_days = Number(maxWaitDays)
 
     try {
       const result = await api.missionCost(payload)
@@ -294,7 +302,7 @@ export default function CustomSelectionSummary({
   }
 
   function handleConfirm() {
-    onConfirm(costResult, startParams, selected.map((d) => d.norad_id))
+    onConfirm(costResult, startParams, selected.map((d) => d.norad_id), maxWaitDays)
   }
 
   return (
@@ -335,6 +343,20 @@ export default function CustomSelectionSummary({
         siteOptions={siteOptions}
         sitesLoading={sitesLoading}
       />
+
+      <label className="field" style={{ display: 'flex', flexDirection: 'column', marginTop: 8 }}>
+        <span style={{ fontSize: 12, color: 'var(--color-muted, #57606a)', marginBottom: 2 }}>Max wait (days)</span>
+        <input
+          type="number"
+          step="1"
+          min="0"
+          max="30"
+          placeholder="0 (off)"
+          value={maxWaitDays}
+          onChange={(e) => { setMaxWaitDays(e.target.value); setCostResult(null) }}
+          style={{ width: '100%', boxSizing: 'border-box' }}
+        />
+      </label>
 
       {costError && (
         <div className="mc-error" role="alert">

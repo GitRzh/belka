@@ -31,6 +31,7 @@ export default function PlanForm({ onSubmit, onChange, submitting, globeRef }) {
     pool_size: '',
     risk_penalty_scale: '',
     nets_carried: '',
+    max_wait_days: '',
     removal_method_filter: '',
     start_raan_deg: '',
     // weights is a nested object per the API surface — left as raw JSON
@@ -136,6 +137,7 @@ export default function PlanForm({ onSubmit, onChange, submitting, globeRef }) {
     if (advanced.pool_size) payload.pool_size = Number(advanced.pool_size)
     if (advanced.risk_penalty_scale) payload.risk_penalty_scale = Number(advanced.risk_penalty_scale)
     if (advanced.nets_carried) payload.nets_carried = Number(advanced.nets_carried)
+    if (advanced.max_wait_days) payload.max_wait_days = Number(advanced.max_wait_days)
     if (advanced.removal_method_filter) payload.removal_method_filter = advanced.removal_method_filter
     if (advanced.start_raan_deg !== '') payload.start_raan_deg = Number(advanced.start_raan_deg)
 
@@ -334,6 +336,19 @@ export default function PlanForm({ onSubmit, onChange, submitting, globeRef }) {
             placeholder="default: 1"
             value={advanced.nets_carried}
             onChange={(e) => updateAdvanced('nets_carried', e.target.value)}
+          />
+        </label>
+
+        <label className="field">
+          Max wait (days)
+          <input
+            type="number"
+            step="1"
+            min="0"
+            max="30"
+            placeholder="default: 0 (off)"
+            value={advanced.max_wait_days}
+            onChange={(e) => updateAdvanced('max_wait_days', e.target.value)}
           />
         </label>
 

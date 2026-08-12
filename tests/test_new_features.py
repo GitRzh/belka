@@ -752,7 +752,7 @@ def test_naive_route_respects_max_tle_age_days(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 # Expected step keys in both /plan (via optimize_route) and /naive-route after fix.
-_EXPECTED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg", "recommended_wait_days"}
+_EXPECTED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg", "recommended_wait_days", "fuel_saved_km_s"}
 
 
 def test_naive_route_step_breakdown_has_all_five_keys(monkeypatch):
@@ -1303,7 +1303,7 @@ def test_route_ordered_by_risk_score_desc_empty_route():
 # Step 5: exact key-set assertion for solve_forced_route step entries
 # --------------------------------------------------------------------------- #
 
-_EXPECTED_FORCED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg", "recommended_wait_days"}
+_EXPECTED_FORCED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg", "recommended_wait_days", "fuel_saved_km_s"}
 
 
 def test_forced_route_step_breakdown_has_expected_keys():
@@ -1546,3 +1546,71 @@ def test_drift_walk_wait_elapsed_days_advances_on_recommendation():
         wait_on_step0 = r_with_wait.step_breakdown[0]["recommended_wait_days"]
         if wait_on_step0 > 0:
             assert r_with_wait.step_breakdown[1]["arrival_time_days"] >= r_no_wait.step_breakdown[1]["arrival_time_days"]
+
+
+# --------------------------------------------------------------------------- #
+# Step 3: fuel_saved_km_s fields — regression guard + positive proof
+# --------------------------------------------------------------------------- #
+
+def test_total_fuel_saved_zero_when_max_wait_zero():
+    """Regression guard: with max_wait_days=0.0 (default), total_fuel_saved_km_s
+    must be 0.0 and every step's fuel_saved_km_s must also be 0.0."""
+    result = solve_forced_route(_FIXED_TARGETS, **_FIXED_START)
+    assert "error" not in result, f"Unexpected solver error: {result.get('error')}"
+    assert result["total_fuel_saved_km_s"] == 0.0, (
+        f"Expected total_fuel_saved_km_s=0.0 with no wait window, got {result['total_fuel_saved_km_s']}"
+    )
+    for i, step in enumerate(result["step_breakdown"]):
+        assert step["fuel_saved_km_s"] == 0.0, (
+            f"step_breakdown[{i}]['fuel_saved_km_s'] should be 0.0 when max_wait_days=0, "
+            f"got {step['fuel_saved_km_s']}"
+        )
+
+
+def test_total_fuel_saved_positive_when_wait_recommended():
+    """Positive proof: when a wait is recommended (large RAAN gap, low threshold),
+    total_fuel_saved_km_s must equal the sum of per-step fuel_saved_km_s,
+    and if any wait fired the total must be > 0."""
+    nodes, vis, label_fn = _make_two_node_walk(raan_from=0.0, raan_to=90.0)
+    result = _drift_walk(
+        nodes, vis, fuel_budget_km_s=None, label_fn=label_fn,
+        max_wait_days=30.0, min_saving_km_s=0.0,
+    )
+    per_step_sum = round(sum(s["fuel_saved_km_s"] for s in result.step_breakdown), 4)
+    # total_fuel_saved is not a field on _DriftWalkResult itself — it's assembled
+    # by the callers (optimize_route / solve_forced_route).  Test it via the helper
+    # that the endpoint uses: build a minimal forced route result.
+    depot = _build_depot_node(800.0, 74.0, 0.0)
+    target = {
+        "norad_id": 22222,
+        "name": "T",
+        "altitude_km": 800.0,
+        "inclination_deg": 74.0,
+        "raan_deg": 90.0,
+        "risk_score": 0.5,
+        "removal_method": "net_capture",
+        "possible_methods": [],
+        "method_maturity": {},
+        "removal_method_explanation": "",
+    }
+    fr = solve_forced_route(
+        [target],
+        start_altitude_km=800.0,
+        start_inclination_deg=74.0,
+        start_raan_deg=0.0,
+        max_wait_days=30.0,
+        min_saving_km_s=0.0,
+    )
+    assert "error" not in fr
+    # total_fuel_saved_km_s must equal sum of per-step values
+    per_step_total = round(sum(s["fuel_saved_km_s"] for s in fr["step_breakdown"]), 4)
+    assert fr["total_fuel_saved_km_s"] == per_step_total, (
+        f"total_fuel_saved_km_s {fr['total_fuel_saved_km_s']} != "
+        f"sum of per-step values {per_step_total}"
+    )
+    # If any wait was actually recommended, total must be > 0
+    if any(s["recommended_wait_days"] > 0 for s in fr["step_breakdown"]):
+        assert fr["total_fuel_saved_km_s"] > 0, (
+            "A wait was recommended but total_fuel_saved_km_s is 0 — "
+            "fuel_saved_km_s is not being populated correctly"
+        )

@@ -193,6 +193,11 @@ def _drift_walk(
             if best_wait > 0 and (drifted_cost - best_cost) >= min_saving_km_s:
                 recommended_wait_days = best_wait
                 elapsed_days += best_wait  # advisory: advance clock by wait
+                fuel_saved = round(drifted_cost - best_cost, 4)
+            else:
+                fuel_saved = 0.0
+        else:
+            fuel_saved = 0.0
 
         # Budget gate (only when a budget was supplied).
         if fuel_remaining is not None and drifted_cost > fuel_remaining:
@@ -206,6 +211,7 @@ def _drift_walk(
             "arrival_time_days": round(departure_days, 4),
             "raan_drift_deg": round(drift, 4),
             "recommended_wait_days": recommended_wait_days,
+            "fuel_saved_km_s": fuel_saved,
         }
         step_breakdown.append(step)
 
@@ -235,6 +241,8 @@ def optimize_route(
     start_raan_deg: float = 0.0,
     nets_carried: int = DEFAULT_NETS_CARRIED,
     time_limit_seconds: int = SOLVER_TIME_LIMIT_SECONDS,
+    max_wait_days: float = 0.0,
+    min_saving_km_s: float = 0.0,
 ) -> dict[str, Any]:
     """
     Solve the fuel-optimal coverage problem over `pool` (the ~30-50 candidate
@@ -378,6 +386,8 @@ def optimize_route(
         visited_indices=visited_pool_indices,
         fuel_budget_km_s=fuel_budget_km_s,
         label_fn=_label,
+        max_wait_days=max_wait_days,
+        min_saving_km_s=min_saving_km_s,
     )
 
     visited_pool_indices = walk.trimmed_visited_indices
@@ -419,6 +429,7 @@ def optimize_route(
         "step_breakdown": walk.step_breakdown,
         "net_capacity_constrained": nets_carried,
         "min_depot_hop_km_s": round(min(matrix[0][1:]), 4) if len(pool) > 0 else 0.0,
+        "total_fuel_saved_km_s": round(sum(s["fuel_saved_km_s"] for s in walk.step_breakdown), 4),
     }
 
 
@@ -428,6 +439,8 @@ def solve_forced_route(
     start_inclination_deg: float,
     start_raan_deg: float = 0.0,
     fuel_budget_km_s: float | None = None,
+    max_wait_days: float = 0.0,
+    min_saving_km_s: float = 0.0,
 ) -> dict[str, Any]:
     """
     Forced-visit TSP: every object in `targets` MUST be visited.
@@ -549,6 +562,8 @@ def solve_forced_route(
         visited_indices=visited_target_indices,
         fuel_budget_km_s=fuel_budget_km_s,
         label_fn=_label,
+        max_wait_days=max_wait_days,
+        min_saving_km_s=min_saving_km_s,
     )
 
     visited_target_indices = walk.trimmed_visited_indices
@@ -577,6 +592,7 @@ def solve_forced_route(
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
         "step_breakdown": walk.step_breakdown,
         "nets_carried_required": nets_carried_required,
+        "total_fuel_saved_km_s": round(sum(s["fuel_saved_km_s"] for s in walk.step_breakdown), 4),
     }
 
     if fuel_budget_km_s is not None:

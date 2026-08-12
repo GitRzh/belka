@@ -289,6 +289,8 @@ class PlanRequest(BaseModel):
     pool_size: int = Field(DEFAULT_POOL_SIZE, gt=0, description="How many top-risk candidates the optimizer considers")
     weights: Optional[dict[str, float]] = Field(None, description="Override risk_score.py DEFAULT_WEIGHTS, e.g. {'proximity': 0.8, 'lifetime': 0.2}")
     nets_carried: int = Field(1, ge=1, description="Max net_capture stops in the route. Default 1 matches RemoveDEBRIS's actual flight history (it carried exactly one net) -- raise for an explicit exploratory what-if run.")
+    max_wait_days: float = Field(0.0, ge=0, le=30, description="Maximum days to wait at each leg for a lower-cost RAAN alignment. 0.0 (default) disables the wait-window scan and reproduces legacy behaviour exactly.")
+    min_saving_km_s: float = Field(0.0, ge=0, description="Minimum delta-v saving (km/s) a wait must achieve before it is recommended. 0.0 (default) recommends any wait that reduces cost at all.")
     removal_method_filter: Optional[str] = Field(None, description=f"Restrict the route to a single removal method -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}. No real ADR mission has flown mixed capture hardware (RemoveDEBRIS = net+harpoon only, ELSA-M = magnetic docking only), so this models 'one spacecraft, one hardware type'. Unset preserves the current mixed-method behavior.")
     target_norad_id: Optional[int] = Field(None, description="Force this object to be considered by the optimizer even if it wouldn't normally rank into the top pool_size by risk. The optimizer still decides whether to actually visit it (AddDisjunction still applies) -- this only guarantees consideration, not a visit. Rejected if the object is classified monitor_only (never a real target).")
     max_tle_age_days: float = Field(14.0, description="Exclude objects whose TLE epoch is older than this many days from route planning. Default 14.0 matches published TLE-accuracy research (~2 week reliable window). Raise to include older/less-trusted debris, lower to be stricter. Does not affect /debris-field or /debris/{norad_id}, which always show the full field with data_quality labels.")
@@ -402,6 +404,8 @@ class MissionCostRequest(BaseModel):
         min_length=1,
         description="NORAD IDs of the debris objects the user has already chosen to visit. Every ID must exist in the current debris field and none may be monitor_only.",
     )
+    max_wait_days: float = Field(0.0, ge=0, le=30, description="Maximum days to wait at each leg for a lower-cost RAAN alignment. 0.0 (default) disables the wait-window scan and reproduces legacy behaviour exactly.")
+    min_saving_km_s: float = Field(0.0, ge=0, description="Minimum delta-v saving (km/s) a wait must achieve before it is recommended. 0.0 (default) recommends any wait that reduces cost at all.")
 
     @model_validator(mode="before")
     @classmethod
@@ -649,6 +653,8 @@ def _run_plan(req: PlanRequest, *, time_limit_seconds: Optional[int] = None) -> 
         start_inclination_deg=req.start_inclination_deg,
         start_raan_deg=req.start_raan_deg,
         nets_carried=req.nets_carried,
+        max_wait_days=req.max_wait_days,
+        min_saving_km_s=req.min_saving_km_s,
         **opt_kwargs,
     )
 
@@ -1042,6 +1048,8 @@ def mission_cost(req: MissionCostRequest):
         start_altitude_km=req.start_altitude_km,
         start_inclination_deg=req.start_inclination_deg,
         start_raan_deg=req.start_raan_deg,
+        max_wait_days=req.max_wait_days,
+        min_saving_km_s=req.min_saving_km_s,
     )
 
     # Hard solver errors (degenerate orbital elements, truly infeasible geometry)
@@ -1659,6 +1667,7 @@ def naive_route(
             "raan_drift_deg": 0.0,
             # Shape parity with optimizer.py step dicts; drift wait is not modelled here.
             "recommended_wait_days": 0,
+            "fuel_saved_km_s": 0.0,
         })
         # Advance elapsed time using the same heuristic constant optimizer.py uses,
         # so arrival_time_days is on the same scale across both routes.
