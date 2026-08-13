@@ -1878,7 +1878,7 @@ h1, h2, h3 {
    --------------------------------------------------------------------- */
 .route-tab-strip {
   position: absolute;
-  top: 46px;
+  top: 12px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 15;

@@ -377,9 +377,6 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
             }
           } else {
             // Normal mode (not custom-selecting).
-            // Active/pinned dots get a size boost; opacity stays full for everything.
-            // Dimming by focusMode or selection state has been removed — opacity
-            // only changes when the custom-select filter is engaged (above).
             if (isActive) {
               pixelSize = riskSize(debris.risk_score) + 4
             } else if (isPinned) {
@@ -390,6 +387,10 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
             if (isDiffHighlighted) {
               color = Color.fromCssColorString('#00e5ff').withAlpha(0.95)
               pixelSize = riskSize(debris.risk_score) + 6
+            } else if (focusMode === 'dim' && visitedIds !== null && !isVisited) {
+              // HIGHLIGHT mode: dim all non-route dots to near-invisible so the
+              // route stops read clearly against a quiet background.
+              color = riskColor(debris.risk_score).withAlpha(0.18)
             } else {
               color = riskColor(debris.risk_score)
             }
@@ -413,31 +414,18 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
         <Entity>
           <PolylineGraphics
             positions={routePositions}
-            width={routeStyle === 'solid' ? 3 : 2}
+            width={routeStyle === 'solid' ? 4 : 2}
             material={
               routeStyle === 'solid'
-                ? Color.WHITE
+                ? new PolylineDashMaterialProperty({
+                    color: Color.fromCssColorString('#ff6b35'),
+                    gapColor: Color.fromCssColorString('#ff6b35').withAlpha(0.25),
+                    dashLength: 24,
+                    dashPattern: 0xff00,
+                    dashOffset: dashOffset,
+                  })
                 : new PolylineDashMaterialProperty({ color: Color.fromCssColorString('#8A8A8E').withAlpha(0.85), dashLength: 16 })
             }
-          />
-        </Entity>
-      )}
-
-      {/* Animated flow overlay — stacked on top of the white route line.
-          Slow-moving black dashes (0→1 dashOffset loop) give a >>>-motion
-          depot-to-end effect. Only shown when routeStyle === 'solid'. */}
-      {routePositions && routeStyle === 'solid' && (
-        <Entity>
-          <PolylineGraphics
-            positions={routePositions}
-            width={12}
-            material={new PolylineDashMaterialProperty({
-              color: Color.fromCssColorString('#000000').withAlpha(0.7),
-              gapColor: Color.TRANSPARENT,
-              dashLength: 30,
-              dashPattern: 255,
-              dashOffset: dashOffset,
-            })}
           />
         </Entity>
       )}
