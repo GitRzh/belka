@@ -58,7 +58,9 @@ export default function DebrisInfoModal({ debris, pinned, onPin, onClose, active
   const [reasoningLoading, setReasoningLoading] = useState(false)
   const [reasoningError, setReasoningError] = useState(null)
 
-  // Reset tab and reasoning when the selected debris changes
+  // Reset tab when the selected debris changes OR when the active route changes.
+  // If the debris is no longer in the current route (e.g. after a replan), force
+  // the tab back to 'info' so stale reasoning from a previous plan is never shown.
   useEffect(() => {
     const isTarget = activeRouteNoradIds instanceof Set
       ? activeRouteNoradIds.has(debris?.norad_id)
@@ -66,7 +68,7 @@ export default function DebrisInfoModal({ debris, pinned, onPin, onClose, active
     setActiveTab(isTarget ? 'reason' : 'info')
     setReasoning(null)
     setReasoningError(null)
-  }, [debris?.norad_id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [debris?.norad_id, activeRouteNoradIds]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch full detail whenever the selected debris changes
   useEffect(() => {

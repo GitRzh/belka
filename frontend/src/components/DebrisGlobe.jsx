@@ -1,10 +1,6 @@
 import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
-import { Viewer, Entity, PolylineGraphics, PointGraphics } from 'resium'
-import { Cartesian3, Color, Credit, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
-
-// Interval step per tick (80 ms) — values 0→1 loop continuously.
-const FLOW_TICK_MS = 80
-const FLOW_STEP = 0.015
+import { Viewer, Entity, PolylineGraphics, PointGraphics, LabelGraphics } from 'resium'
+import { Cartesian3, Color, Credit, PolylineDashMaterialProperty, ScreenSpaceEventType, Cartesian2, LabelStyle } from 'cesium'
 
 // Spherical linear interpolation between two Cartesian3 positions.
 // Returns `steps` points from `a` up to (but not including) `b`.
@@ -145,16 +141,6 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
   const pinEntitiesRef = useRef({})
   const ageMin = useCacheAge(cacheMetadata?.data_fetched_at)
 
-  // dashOffset cycles 0→1 for the animated flow overlay on the route line.
-  const [dashOffset, setDashOffset] = useState(0)
-  useEffect(() => {
-    if (routeStyle !== 'solid') return
-    const id = setInterval(() => {
-      setDashOffset(prev => (prev + FLOW_STEP) % 1)
-    }, FLOW_TICK_MS)
-    return () => clearInterval(id)
-  }, [routeStyle])
-
   useImperativeHandle(ref, () => ({
     /** Smoothly fly the camera to the given geographic position at the given range. */
     flyTo(lon, lat, altKm) {
@@ -264,16 +250,21 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
   // Resolve each route label to a Cesium position.  Depot is prepended so the
   // depot -> first-debris leg actually draws; without it the polyline only
   // connects debris-to-debris and the first leg is missing.
-  const stopPositions = route?.length
+  //
+  // orderedStops: parallel array of { debris, position } objects in route order.
+  // depot entry has debris=null. Used for start/end markers and stop numbers.
+  const orderedStops = route?.length
     ? [
-        ...(depot ? [debrisPosition(depot)] : []),
+        ...(depot ? [{ debris: null, position: debrisPosition(depot) }] : []),
         ...route
           .map(noradIdFromRouteLabel)
           .map((noradId) => debrisField.find((d) => d.norad_id === noradId))
           .filter(Boolean)
-          .map(debrisPosition),
+          .map((d) => ({ debris: d, position: debrisPosition(d) })),
       ]
     : null
+
+  const stopPositions = orderedStops?.map((s) => s.position) ?? null
 
   // Expand consecutive stop pairs into smooth arcs via slerp.
   // Each leg contributes ARC_STEPS intermediate points; the final stop is
@@ -414,21 +405,59 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
         <Entity>
           <PolylineGraphics
             positions={routePositions}
-            width={routeStyle === 'solid' ? 4 : 2}
+            width={routeStyle === 'solid' ? 3 : 2}
             material={
               routeStyle === 'solid'
-                ? new PolylineDashMaterialProperty({
-                    color: Color.fromCssColorString('#ff6b35'),
-                    gapColor: Color.fromCssColorString('#ff6b35').withAlpha(0.25),
-                    dashLength: 24,
-                    dashPattern: 0xff00,
-                    dashOffset: dashOffset,
-                  })
+                ? Color.WHITE.withAlpha(0.6)
                 : new PolylineDashMaterialProperty({ color: Color.fromCssColorString('#8A8A8E').withAlpha(0.85), dashLength: 16 })
             }
+            disableDepthTestDistance={routeStyle === 'solid' ? Number.POSITIVE_INFINITY : undefined}
           />
         </Entity>
       )}
+
+      {/* Route stop markers — rendered on top of risk-colored debris dots.
+          First stop (depot or first debris): white fill, black outline.
+          All other stops including last: dodger blue, no special outline.
+          Both sizes enlarged (~12px) vs normal debris dots (~6–16px).
+          Never dimmed by focusMode — always full opacity. */}
+      {orderedStops && routeStyle === 'solid' && orderedStops.map((stop, idx) => {
+        const isFirst = idx === 0
+        return (
+          <Entity key={`route-marker-${isFirst ? 'start' : stop.debris?.norad_id ?? idx}`} position={stop.position}>
+            <PointGraphics
+              pixelSize={12}
+              color={isFirst ? Color.WHITE : Color.DODGERBLUE}
+              outlineColor={isFirst ? Color.BLACK : Color.WHITE}
+              outlineWidth={isFirst ? 2 : 1}
+              disableDepthTestDistance={Number.POSITIVE_INFINITY}
+            />
+          </Entity>
+        )
+      })}
+
+      {/* Stop numbers — small white labels with black outline, offset above each
+          debris dot in route order. Depot (index 0, debris=null) is skipped;
+          debris stops are numbered 1…N. Only shown on solid (AI) route. */}
+      {orderedStops && routeStyle === 'solid' && orderedStops.map((stop, idx) => {
+        if (!stop.debris) return null  // skip depot
+        const stopNum = idx - (depot ? 1 : 0) + 1  // 1-based debris stop number
+        return (
+          <Entity key={`route-label-${stop.debris.norad_id}`} position={stop.position}>
+            <LabelGraphics
+              text={String(stopNum)}
+              font="bold 11px sans-serif"
+              fillColor={Color.WHITE}
+              outlineColor={Color.BLACK}
+              outlineWidth={2}
+              style={LabelStyle.FILL_AND_OUTLINE}
+              pixelOffset={new Cartesian2(0, -22)}
+              disableDepthTestDistance={Number.POSITIVE_INFINITY}
+              showBackground={false}
+            />
+          </Entity>
+        )
+      })}
     </Viewer>
     </div>
   )
