@@ -1934,3 +1934,26 @@ h1, h2, h3 {
   border-color: var(--c-signal);
   color: var(--c-void);
 }
+
+/* Stacking modifier: push route-tab-strip below the Clear All button
+   when both are visible simultaneously (2+ pinned objects + active plan). */
+.route-tab-strip--below-clear-all {
+  top: 46px;
+}
+
+/* Manifest leg-index click-to-focus button */
+.leg-index-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: color 0.12s ease;
+  line-height: inherit;
+}
+.leg-index-btn:hover {
+  color: var(--c-ink);
+}

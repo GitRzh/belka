@@ -11,8 +11,19 @@
 //                        the normal (successful-plan) case
 //   onApplyProposal    — callback(proposal) invoked when the user clicks Apply
 //   submitting         — bool, disables buttons while a replan is in flight
+//   globeRef           — optional ref with .flyTo(lon, lat, altKm) — when provided,
+//                        leg-index numbers become clickable to pan the globe camera
+//   debrisField        — optional debris array — needed alongside globeRef to resolve
+//                        step label "NAME (norad_id)" to actual coordinates
 
-export default function ReasoningPanel({ plan, explanationOverride, proposals, onApplyProposal, submitting }) {
+// Parse the trailing norad_id integer out of a route label like "COSMOS 2251 (22675)".
+// Returns null for depot or any label without a trailing numeric group.
+function noradIdFromLabel(label) {
+  const m = /\((\d+)\)$/.exec(label ?? '')
+  return m ? Number(m[1]) : null
+}
+
+export default function ReasoningPanel({ plan, explanationOverride, proposals, onApplyProposal, submitting, globeRef, debrisField }) {
   if (!plan) return null
 
   const showProposals = Array.isArray(proposals) && proposals.length > 0
@@ -72,9 +83,31 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
               </tr>
             </thead>
             <tbody>
-              {plan.step_breakdown.map((step, i) => (
+              {plan.step_breakdown.map((step, i) => {
+                // Resolve step.to → debris object → flyTo coords when globeRef present.
+                const toNoradId = noradIdFromLabel(step.to)
+                const toDebris = (globeRef && debrisField && toNoradId != null)
+                  ? debrisField.find(d => d.norad_id === toNoradId)
+                  : null
+                return (
                 <tr key={i}>
-                  <td className="leg-index">{String(i + 1).padStart(2, '0')}</td>
+                  <td className="leg-index">
+                    {toDebris ? (
+                      <button
+                        className="leg-index-btn"
+                        title={`Pan to ${toDebris.name ?? step.to}`}
+                        onClick={() => globeRef.current?.flyTo(
+                          toDebris.longitude,
+                          toDebris.latitude,
+                          toDebris.altitude_km,
+                        )}
+                      >
+                        {String(i + 1).padStart(2, '0')}
+                      </button>
+                    ) : (
+                      String(i + 1).padStart(2, '0')
+                    )}
+                  </td>
                   <td>{step.from}</td>
                   <td>{step.to}</td>
                   <td>{step.delta_v_km_s}</td>
@@ -82,7 +115,8 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
                   <td>{step.raan_drift_deg ?? '—'}</td>
                   <td>{step.recommended_wait_days ?? '—'}</td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </details>

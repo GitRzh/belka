@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef } from 'react'
+import { Fragment, useState, useEffect, useRef, useMemo } from 'react'
 import DebrisGlobe from './components/DebrisGlobe.jsx'
 import DebrisInfoModal from './components/DebrisInfoModal.jsx'
 import MissionClock from './components/MissionClock.jsx'
@@ -79,7 +79,7 @@ function FilterDropup({ filter, onChange, onClose }) {
 
 // Render the full detail view for a single history entry.
 // Extracted so it can be used in Workspace without duplication.
-function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, replanning, onApplyProposal }) {
+function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, replanning, onApplyProposal, globeRef, debrisField }) {
   if (entry.status === 'running') {
     return <p className="history-summary" style={{ marginTop: 8 }}>Running…</p>
   }
@@ -135,6 +135,8 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
             proposals={activePlan?.proposals}
             onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
             submitting={replanning}
+            globeRef={globeRef}
+            debrisField={debrisField}
           />
         </div>
       ) : (
@@ -145,6 +147,8 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
               proposals={entry.result?.proposals}
               onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
               submitting={replanning}
+              globeRef={globeRef}
+              debrisField={debrisField}
             />
           )}
           {entry.status === 'done' && entry.kind === 'replan' && (
@@ -174,7 +178,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                   <dd>{entry.result.diff.risk_delta > 0 ? '+' : ''}{entry.result.diff.risk_delta}</dd>
                 </dl>
               )}
-              <ReasoningPanel plan={entry.result.new_plan} />
+              <ReasoningPanel plan={entry.result.new_plan} globeRef={globeRef} debrisField={debrisField} />
             </div>
           )}
           {entry.status === 'done' && entry.kind === 'mission_cost' && (
@@ -579,6 +583,30 @@ export default function App() {
 
   const activePlan = routeMode === 'ai' ? plan : naivePlan
 
+  // Stable Set of norad IDs in the current active plan's route.
+  // useMemo ensures the Set reference only changes when the route content
+  // actually changes — not on every App re-render.  This prevents the
+  // DebrisInfoModal tab-reset effect from firing spuriously on unrelated
+  // renders, which was causing the Reason tab to be immediately overwritten
+  // back to Info even for debris objects that ARE in the current route.
+  const activeRouteNoradIds = useMemo(() => {
+    if (!activePlan) return null
+    const ids = new Set()
+    if (activePlan.route_details?.length) {
+      for (const d of activePlan.route_details) {
+        if (d.norad_id != null) ids.add(d.norad_id)
+      }
+    } else if (activePlan.route?.length) {
+      for (const label of activePlan.route) {
+        const m = label.match(/\((\d+)\)$/)
+        if (m) ids.add(Number(m[1]))
+      }
+    }
+    return ids.size > 0 ? ids : null
+  // Depend on the route array/details reference — changes only when activePlan changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePlan?.route, activePlan?.route_details])
+
   function handleDebrisSelect(debris) {
     setActiveDebrisId(debris.norad_id)
   }
@@ -768,9 +796,14 @@ export default function App() {
         {/* ── LEFT: Globe pane (50%) ──────────────────────────────────── */}
         <div className="globe-pane reticle" style={{ position: 'relative' }}>
 
-          {/* Route tab strip — shown once a plan exists */}
+          {/* Route tab strip — shown once a plan exists.
+              When the "Clear All" button is also visible (2+ pinned objects),
+              push the strip down one row to avoid overlapping it. */}
           {routeTabs.length > 0 && (
-            <div className="route-tab-strip" data-testid="route-tab-strip">
+            <div
+              className={`route-tab-strip${pinnedDebris.size >= 2 ? ' route-tab-strip--below-clear-all' : ''}`}
+              data-testid="route-tab-strip"
+            >
               <span className="route-tab-strip-label">Route</span>
               {routeTabs.map((tab, idx) => (
                 <button
@@ -931,25 +964,8 @@ export default function App() {
             const debris = debrisField.find(d => d.norad_id === activeDebrisId)
             if (!debris) return null
             const isPinned = pinnedDebris.has(activeDebrisId)
-            // Build the set of NORAD IDs in the current active plan route so the
-            // DebrisInfoModal can decide whether to show the Reason tab.
-            // route_details is the canonical source — it has norad_id directly.
-            // Falls back to parsing "NAME (norad_id)" labels from route[] if needed.
-            let activeRouteNoradIds = null
-            if (activePlan) {
-              const ids = new Set()
-              if (activePlan.route_details?.length) {
-                for (const d of activePlan.route_details) {
-                  if (d.norad_id != null) ids.add(d.norad_id)
-                }
-              } else if (activePlan.route?.length) {
-                for (const label of activePlan.route) {
-                  const m = label.match(/\((\d+)\)$/)
-                  if (m) ids.add(Number(m[1]))
-                }
-              }
-              if (ids.size > 0) activeRouteNoradIds = ids
-            }
+            // activeRouteNoradIds is memoized at component level — stable reference
+            // that only changes when the active plan's route content changes.
             return (
               <DebrisInfoModal
                 debris={debris}
@@ -1147,6 +1163,8 @@ export default function App() {
                     activePlan={activePlan}
                     onToggleNaive={handleToggleNaive}
                     onEditSelection={handleEditSelection}
+                    globeRef={globeRef}
+                    debrisField={debrisField}
                     onReplan={handleWorkspaceReplan}
                     onApplyProposal={handleApplyProposal}
                     replanning={replanning}
