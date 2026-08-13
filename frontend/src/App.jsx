@@ -411,7 +411,7 @@ export default function App() {
       setRouteMode('ai')
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', result } : e))
       // Reset route tab strip to just the Plan tab
-      setRouteTabs([{ label: 'Plan', route: result.route ?? [] }])
+      setRouteTabs([{ label: 'Plan', route: result.route ?? [], type: 'plan' }])
       setActiveRouteTabIdx(0)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
@@ -435,7 +435,7 @@ export default function App() {
       const lastReplanNum = trimmed.length > 0
         ? Number(trimmed[trimmed.length - 1].label.replace('Replan #', ''))
         : 0
-      const nextTabs = [planTab, ...trimmed, { label: `Replan #${lastReplanNum + 1}`, route: newRoute ?? [] }]
+      const nextTabs = [planTab, ...trimmed, { label: `Replan #${lastReplanNum + 1}`, route: newRoute ?? [], type: 'replan' }]
       // Schedule active-index update to point at the new last tab.
       setActiveRouteTabIdx(nextTabs.length - 1)
       return nextTabs
@@ -747,10 +747,25 @@ export default function App() {
   }
 
   // Route tab strip derived values.
-  // The active tab's route overrides the plan route on the globe.
-  const activeTabRoute = routeTabs.length > 0
+  // Only resolve to a tab route when in AI mode — naive mode always bypasses
+  // the tab strip and reads naivePlan.route directly on the globe prop below.
+  const activeTabRoute = routeMode === 'ai' && routeTabs.length > 0
     ? routeTabs[Math.min(activeRouteTabIdx, routeTabs.length - 1)].route
-    : activePlan?.route
+    : null
+
+  // Route recency color for the active tab's polyline.
+  // Rule: white if plan tab with no replans; green if this is the latest replan tab;
+  // orange for everything else (plan tab once any replan exists, or older replan tabs).
+  const routeColor = (() => {
+    if (routeTabs.length === 0) return 'white'
+    const hasAnyReplan = routeTabs.some(t => t.type === 'replan')
+    const activeTab = routeTabs[Math.min(activeRouteTabIdx, routeTabs.length - 1)]
+    if (!hasAnyReplan) return 'white'
+    const lastReplanIdx = routeTabs.reduce((best, t, i) => t.type === 'replan' ? i : best, -1)
+    const activeIdx = Math.min(activeRouteTabIdx, routeTabs.length - 1)
+    if (activeTab.type === 'replan' && activeIdx === lastReplanIdx) return '#B4FF00'
+    return 'orange'
+  })()
 
   // Diff highlight: for any replan tab, find debris stops that differ from the previous tab.
   const diffHighlightIds = (() => {
@@ -820,9 +835,10 @@ export default function App() {
           <DebrisGlobe
             ref={globeRef}
             debrisField={debrisField}
-            route={activeTabRoute ?? activePlan?.route}
+            route={routeMode === 'ai' ? (activeTabRoute ?? activePlan?.route) : naivePlan?.route}
             depot={activePlan?.depot}
             routeStyle={routeMode === 'ai' ? 'solid' : 'dashed'}
+            routeColor={routeColor}
             cacheMetadata={cacheMetadata}
             focusMode={focusMode}
             activeDebrisId={activeDebrisId}

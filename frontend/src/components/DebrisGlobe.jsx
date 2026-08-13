@@ -116,6 +116,7 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
   route,
   depot,
   routeStyle = 'solid',
+  routeColor = 'white',
   cacheMetadata,
   focusMode = 'dim',
   activeDebrisId = null,
@@ -401,7 +402,7 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
           )
         })}
 
-      {/* Route polyline: solid white for AI route, gray dashes for naive route. */}
+      {/* Route polyline: recency-colored for AI route, gray dashes for naive route. */}
       {routePositions && (
         <Entity>
           <PolylineGraphics
@@ -409,7 +410,7 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
             width={routeStyle === 'solid' ? 3 : 2}
             material={
               routeStyle === 'solid'
-                ? Color.WHITE
+                ? Color.fromCssColorString(routeColor)
                 : new PolylineDashMaterialProperty({
                     color: Color.fromCssColorString('#8A8A8E').withAlpha(0.85),
                     dashLength: 16,
