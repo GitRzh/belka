@@ -2,6 +2,10 @@ import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 're
 import { Viewer, Entity, PolylineGraphics, PointGraphics } from 'resium'
 import { Cartesian3, Color, Credit, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
 
+// Interval step per tick (80 ms) — values 0→1 loop continuously.
+const FLOW_TICK_MS = 80
+const FLOW_STEP = 0.015
+
 // Spherical linear interpolation between two Cartesian3 positions.
 // Returns `steps` points from `a` up to (but not including) `b`.
 // Each point's radius is linearly interpolated between rA and rB so that:
@@ -129,6 +133,9 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
   //   - methods is empty OR removal_method is in methods  (AND logic)
   // Dimmed objects remain fully clickable/selectable — this is visual only.
   customFilterConfig = null,
+  // diffHighlightIds: Set<noradId> | null
+  // Debris stops that changed relative to the previous route tab — highlighted cyan.
+  diffHighlightIds = null,
   onDebrisSelect,
   onDebrisToggleSelect,
   onBackgroundClick,
@@ -137,6 +144,16 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
   // Track pin entities keyed by caller-provided id so we can remove the old one on re-pin.
   const pinEntitiesRef = useRef({})
   const ageMin = useCacheAge(cacheMetadata?.data_fetched_at)
+
+  // dashOffset cycles 0→1 for the animated flow overlay on the route line.
+  const [dashOffset, setDashOffset] = useState(0)
+  useEffect(() => {
+    if (routeStyle !== 'solid') return
+    const id = setInterval(() => {
+      setDashOffset(prev => (prev + FLOW_STEP) % 1)
+    }, FLOW_TICK_MS)
+    return () => clearInterval(id)
+  }, [routeStyle])
 
   useImperativeHandle(ref, () => ({
     /** Smoothly fly the camera to the given geographic position at the given range. */
@@ -328,6 +345,8 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
           const isPinned = pinnedIds?.has(debris.norad_id) ?? false
           const isActive = debris.norad_id === activeDebrisId
 
+          const isDiffHighlighted = diffHighlightIds?.has(debris.norad_id) ?? false
+
           if (customSelecting && customSelectedIds) {
             // Custom selection mode.
             // Selected dots → cyan highlight + size boost.
@@ -366,7 +385,14 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
             } else if (isPinned) {
               pixelSize = riskSize(debris.risk_score) + 2
             }
-            color = riskColor(debris.risk_score)
+            // Diff-highlight overrides risk color with cyan when viewing a replan tab
+            // and this stop wasn't present in the previous tab (added / changed stop).
+            if (isDiffHighlighted) {
+              color = Color.fromCssColorString('#00e5ff').withAlpha(0.95)
+              pixelSize = riskSize(debris.risk_score) + 6
+            } else {
+              color = riskColor(debris.risk_score)
+            }
           }
 
           return (
@@ -393,6 +419,25 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
                 ? Color.WHITE
                 : new PolylineDashMaterialProperty({ color: Color.fromCssColorString('#8A8A8E').withAlpha(0.85), dashLength: 16 })
             }
+          />
+        </Entity>
+      )}
+
+      {/* Animated flow overlay — stacked on top of the white route line.
+          Slow-moving black dashes (0→1 dashOffset loop) give a >>>-motion
+          depot-to-end effect. Only shown when routeStyle === 'solid'. */}
+      {routePositions && routeStyle === 'solid' && (
+        <Entity>
+          <PolylineGraphics
+            positions={routePositions}
+            width={12}
+            material={new PolylineDashMaterialProperty({
+              color: Color.fromCssColorString('#000000').withAlpha(0.7),
+              gapColor: Color.TRANSPARENT,
+              dashLength: 30,
+              dashPattern: 255,
+              dashOffset: dashOffset,
+            })}
           />
         </Entity>
       )}

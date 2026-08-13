@@ -321,6 +321,16 @@ function buildHistorySummary(entry) {
   return null
 }
 
+// Maximum number of replan tabs (not counting the pinned Plan tab).
+const MAX_ROUTE_REPLAN_TABS = 5
+
+// Parse norad id from a route label string like "COSMOS 2251 (22675)".
+// Returns null for labels without a trailing numeric id (e.g. depot).
+function noradIdFromLabel(label) {
+  const m = /\((\d+)\)$/.exec(label)
+  return m ? Number(m[1]) : null
+}
+
 export default function App() {
   const globeRef = useRef(null)
 
@@ -336,6 +346,11 @@ export default function App() {
   const [routeMode, setRouteMode] = useState('ai')
   const [focusMode, setFocusMode] = useState('dim')
   const [history, setHistory] = useState([])
+
+  // Route tab strip — always: Plan tab (index 0) + up to MAX_ROUTE_REPLAN_TABS replan tabs.
+  // Each entry: { label: string, route: string[] }
+  const [routeTabs, setRouteTabs] = useState([])
+  const [activeRouteTabIdx, setActiveRouteTabIdx] = useState(0)
 
   // activeWorkspaceId — id of the history entry currently open in the Workspace section.
   // null = empty/dimmed placeholder state.
@@ -391,12 +406,36 @@ export default function App() {
       setPlan(result)
       setRouteMode('ai')
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', result } : e))
+      // Reset route tab strip to just the Plan tab
+      setRouteTabs([{ label: 'Plan', route: result.route ?? [] }])
+      setActiveRouteTabIdx(0)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
     } finally {
       setPlanning(false)
     }
+  }
+
+  // Helper: append a new replan tab (drops oldest replan if over cap; Plan always stays).
+  // Returns the next tabs array so callers can compute the new active index synchronously.
+  function appendReplanTab(newRoute) {
+    setRouteTabs(prev => {
+      const planTab = prev[0] ?? { label: 'Plan', route: [] }
+      const replanTabs = prev.slice(1)
+      // Drop oldest replan if at cap
+      const trimmed = replanTabs.length >= MAX_ROUTE_REPLAN_TABS
+        ? replanTabs.slice(1)
+        : replanTabs
+      // Derive the next sequential replan number from the last tab's label.
+      const lastReplanNum = trimmed.length > 0
+        ? Number(trimmed[trimmed.length - 1].label.replace('Replan #', ''))
+        : 0
+      const nextTabs = [planTab, ...trimmed, { label: `Replan #${lastReplanNum + 1}`, route: newRoute ?? [] }]
+      // Schedule active-index update to point at the new last tab.
+      setActiveRouteTabIdx(nextTabs.length - 1)
+      return nextTabs
+    })
   }
 
   // Replan now OVERWRITES the same entry in-place (no branching).
@@ -417,6 +456,8 @@ export default function App() {
       // rather than the original pre-replan values.
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result } : e))
+      // Append replan tab
+      appendReplanTab(result.new_plan?.route)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -660,6 +701,8 @@ export default function App() {
       // rather than the original pre-replan values.
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result, kind: 'replan' } : e))
+      // Append replan tab
+      appendReplanTab(result.new_plan?.route)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -674,6 +717,24 @@ export default function App() {
   function getEntryNumber(entryId) {
     return history.findIndex(e => e.id === entryId) + 1
   }
+
+  // Route tab strip derived values.
+  // The active tab's route overrides the plan route on the globe.
+  const activeTabRoute = routeTabs.length > 0
+    ? routeTabs[Math.min(activeRouteTabIdx, routeTabs.length - 1)].route
+    : activePlan?.route
+
+  // Diff highlight: for any replan tab, find debris stops that differ from the previous tab.
+  const diffHighlightIds = (() => {
+    if (routeTabs.length < 2 || activeRouteTabIdx === 0) return null
+    const prevRoute = routeTabs[activeRouteTabIdx - 1]?.route ?? []
+    const currRoute = routeTabs[activeRouteTabIdx]?.route ?? []
+    const prevIds = new Set(prevRoute.map(noradIdFromLabel).filter(Boolean))
+    const currIds = new Set(currRoute.map(noradIdFromLabel).filter(Boolean))
+    // Stops present in current tab but not in the previous tab (added/changed).
+    const diffIds = new Set([...currIds].filter(id => !prevIds.has(id)))
+    return diffIds.size > 0 ? diffIds : null
+  })()
 
   const activeWorkspaceEntry = activeWorkspaceId ? history.find(e => e.id === activeWorkspaceId) : null
   const latestEntry = history.length > 0 ? history[history.length - 1] : null
@@ -706,10 +767,27 @@ export default function App() {
       <div className="app-body">
         {/* ── LEFT: Globe pane (50%) ──────────────────────────────────── */}
         <div className="globe-pane reticle" style={{ position: 'relative' }}>
+
+          {/* Route tab strip — shown once a plan exists */}
+          {routeTabs.length > 0 && (
+            <div className="route-tab-strip" data-testid="route-tab-strip">
+              <span className="route-tab-strip-label">Route</span>
+              {routeTabs.map((tab, idx) => (
+                <button
+                  key={idx}
+                  className={`route-tab-btn${activeRouteTabIdx === idx ? ' route-tab-btn--active' : ''}`}
+                  onClick={() => setActiveRouteTabIdx(idx)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          )}
+
           <DebrisGlobe
             ref={globeRef}
             debrisField={debrisField}
-            route={activePlan?.route}
+            route={activeTabRoute ?? activePlan?.route}
             depot={activePlan?.depot}
             routeStyle={routeMode === 'ai' ? 'solid' : 'dashed'}
             cacheMetadata={cacheMetadata}
@@ -719,6 +797,7 @@ export default function App() {
             customSelecting={customSelecting}
             customSelectedIds={customSelectedIds}
             customFilterConfig={customFilterConfig}
+            diffHighlightIds={diffHighlightIds}
             onDebrisSelect={handleDebrisSelect}
             onDebrisToggleSelect={handleDebrisToggleSelect}
             onBackgroundClick={() => {

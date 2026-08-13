@@ -1871,3 +1871,66 @@ h1, h2, h3 {
   text-transform: uppercase;
   height: auto;
 }
+
+/* ---------------------------------------------------------------------
+   Route tab strip — overlays top-center of the globe pane.
+   Shows Plan + up to 5 Replan tabs; active tab is white-on-dark.
+   --------------------------------------------------------------------- */
+.route-tab-strip {
+  position: absolute;
+  top: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(11, 11, 12, 0.82);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  white-space: nowrap;
+}
+
+.route-tab-strip-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--c-steel);
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+.route-tab-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: transparent;
+  color: var(--c-steel);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+  flex-shrink: 0;
+}
+
+.route-tab-btn:hover {
+  color: var(--c-ink);
+  border-color: var(--c-line);
+}
+
+.route-tab-btn--active {
+  color: var(--c-void);
+  background: var(--c-ink);
+  border-color: var(--c-ink);
+}
+.route-tab-btn--active:hover {
+  background: var(--c-signal);
+  border-color: var(--c-signal);
+  color: var(--c-void);
+}
