@@ -212,6 +212,7 @@ def _drift_walk(
             "raan_drift_deg": round(drift, 4),
             "recommended_wait_days": recommended_wait_days,
             "fuel_saved_km_s": fuel_saved,
+            "data_quality": to_node.get("data_quality", "unknown"),
         }
         step_breakdown.append(step)
 
@@ -412,6 +413,7 @@ def optimize_route(
             "removal_method_explanation": o.get("removal_method_explanation", ""),
             "risk_score": round(o.get("risk_score", 0.0), 4),
             "arrival_time_days": round(walk.arrival_time_per_i.get(pool_i, 0.0), 4),
+            "data_quality": o.get("data_quality", "unknown"),
         }
         for pool_i, o in zip(visited_pool_indices, visited_objects)
     ]
@@ -580,6 +582,7 @@ def solve_forced_route(
             "removal_method_explanation": o.get("removal_method_explanation", ""),
             "risk_score": round(o.get("risk_score", 0.0), 4),
             "arrival_time_days": round(walk.arrival_time_per_i.get(target_i, 0.0), 4),
+            "data_quality": o.get("data_quality", "unknown"),
         }
         for target_i, o in zip(visited_target_indices, visited_objects)
     ]

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import DataQualityBadge from './DataQualityBadge.jsx'
 
 // Friendly human labels for the removal_method enum values from removal_method.py
 const REMOVAL_METHOD_LABELS = {
@@ -197,7 +198,7 @@ export default function DebrisInfoModal({ debris, pinned, onPin, onClose, active
                 <Row label="Name" value={detail.name} />
                 <Row label="NORAD ID" value={detail.norad_id} />
                 <Row label="Object type" value={detail.object_type === 'intact' ? 'Intact object' : 'Fragment (DEB)'} />
-                <Row label="Data quality" value={detail.data_quality} />
+                <Row label="Data quality" value={<DataQualityBadge value={detail.data_quality} />} />
                 <Row label="TLE epoch age" value={detail.epoch_age_days !== undefined ? `${detail.epoch_age_days} days` : null} />
 
                 <SectionHeading>Position</SectionHeading>

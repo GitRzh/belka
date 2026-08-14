@@ -1253,16 +1253,25 @@ def _explain_plan(route_result: dict[str, Any]) -> Optional[str]:
         m = obj.get("removal_method", "unclassified")
         method_counts[m] = method_counts.get(m, 0) + 1
 
+    data_quality_counts: dict[str, int] = {}
+    for obj in details:
+        q = obj.get("data_quality", "unknown")
+        data_quality_counts[q] = data_quality_counts.get(q, 0) + 1
+
     prompt = (
         "You are a mission-briefing assistant for an orbital debris removal programme. "
         "Write exactly 2-3 plain-English sentences briefing the operator on this planned route. "
         "Focus on: how many objects are targeted, the mix of removal methods needed, and total "
         "fuel/risk collected. If any objects were skipped, add a brief, high-level reason "
         "(cost-vs-risk tradeoff) -- do not speculate about specific objects that were skipped. "
+        "If data_quality_counts contains aging or stale objects, use hedged language for those "
+        "objects (e.g. 'likely', 'estimated') rather than stating figures flatly; if all objects "
+        "are fresh, use the current confident tone unchanged. "
         "Output only the briefing -- no JSON, no markdown.\n\n"
         + json.dumps({
             "visited_count": route_result.get("visited_count"),
             "removal_method_counts": method_counts,
+            "data_quality_counts": data_quality_counts,
             "total_fuel_cost_km_s": route_result.get("total_fuel_cost_km_s"),
             "fuel_budget_km_s": route_result.get("fuel_budget_km_s"),
             "fuel_used_fraction": route_result.get("fuel_used_fraction"),
@@ -1668,6 +1677,7 @@ def naive_route(
             # Shape parity with optimizer.py step dicts; drift wait is not modelled here.
             "recommended_wait_days": 0,
             "fuel_saved_km_s": 0.0,
+            "data_quality": nodes[next_idx].get("data_quality", "unknown"),
         })
         # Advance elapsed time using the same heuristic constant optimizer.py uses,
         # so arrival_time_days is on the same scale across both routes.
@@ -1691,6 +1701,7 @@ def naive_route(
             "possible_methods": o.get("possible_methods", []),
             "method_maturity": o.get("method_maturity", {}),
             "risk_score": round(o.get("risk_score", 0.0), 4),
+            "data_quality": o.get("data_quality", "unknown"),
         }
         for o in visited_objects
     ]

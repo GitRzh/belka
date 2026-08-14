@@ -16,6 +16,8 @@
 //   debrisField        — optional debris array — needed alongside globeRef to resolve
 //                        step label "NAME (norad_id)" to actual coordinates
 
+import DataQualityBadge from './DataQualityBadge.jsx'
+
 // Parse the trailing norad_id integer out of a route label like "COSMOS 2251 (22675)".
 // Returns null for depot or any label without a trailing numeric group.
 function noradIdFromLabel(label) {
@@ -77,7 +79,7 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
           <table className="manifest-table">
             <thead>
               <tr>
-                {['Leg', 'From', 'To', 'Δv (km/s)', 'Arrival (days)', 'RAAN drift (°)', 'Wait (days)'].map((h) => (
+                {['Leg', 'From', 'To', 'Δv (km/s)', 'Arrival (days)', 'RAAN drift (°)', 'Wait (days)', 'Data'].map((h) => (
                   <th key={h}>{h}</th>
                 ))}
               </tr>
@@ -114,6 +116,7 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
                   <td>{step.arrival_time_days ?? '—'}</td>
                   <td>{step.raan_drift_deg ?? '—'}</td>
                   <td>{step.recommended_wait_days ?? '—'}</td>
+                  <td><DataQualityBadge value={step.data_quality} /></td>
                 </tr>
                 )
               })}

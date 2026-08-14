@@ -752,7 +752,7 @@ def test_naive_route_respects_max_tle_age_days(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 # Expected step keys in both /plan (via optimize_route) and /naive-route after fix.
-_EXPECTED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg", "recommended_wait_days", "fuel_saved_km_s"}
+_EXPECTED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg", "recommended_wait_days", "fuel_saved_km_s", "data_quality"}
 
 
 def test_naive_route_step_breakdown_has_all_five_keys(monkeypatch):
@@ -1303,7 +1303,7 @@ def test_route_ordered_by_risk_score_desc_empty_route():
 # Step 5: exact key-set assertion for solve_forced_route step entries
 # --------------------------------------------------------------------------- #
 
-_EXPECTED_FORCED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg", "recommended_wait_days", "fuel_saved_km_s"}
+_EXPECTED_FORCED_STEP_KEYS = {"from", "to", "delta_v_km_s", "arrival_time_days", "raan_drift_deg", "recommended_wait_days", "fuel_saved_km_s", "data_quality"}
 
 
 def test_forced_route_step_breakdown_has_expected_keys():
