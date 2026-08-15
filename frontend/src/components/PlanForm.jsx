@@ -80,9 +80,11 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
 
   // When a preset's weights are applied from the comparison panel, populate
   // weights_json. Only weights_json changes — all other fields are untouched.
+  // presetWeights is shaped { weights, seq } so the same preset clicked twice
+  // still produces a new object reference and re-fires this effect.
   useEffect(() => {
     if (presetWeights != null) {
-      updateAdvanced('weights_json', JSON.stringify(presetWeights, null, 2))
+      updateAdvanced('weights_json', JSON.stringify(presetWeights.weights, null, 2))
     }
   }, [presetWeights])
 

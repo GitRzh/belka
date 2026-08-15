@@ -377,7 +377,11 @@ export default function App() {
   const [replanning, setReplanning] = useState(false)
   const [comparing, setComparing] = useState(false)
   const [comparisonResult, setComparisonResult] = useState(null)
+  // Wrapped as { weights, seq } so that clicking the same preset twice in a row
+  // always produces a new object reference — even if preset.weights is the same
+  // identity — guaranteeing PlanForm's useEffect re-fires on every click.
   const [presetWeightsToApply, setPresetWeightsToApply] = useState(null)
+  const presetWeightsSeqRef = useRef(0)
   const [formError, setFormError] = useState(null)
 
   // Visualization arrow panel open/closed state
@@ -459,7 +463,8 @@ export default function App() {
     // preset's weights and close the comparison panel. Does NOT fabricate a result,
     // touch History, set plan, or navigate to workspace. The user then manually
     // clicks Generate Plan to produce a real result.
-    setPresetWeightsToApply(preset.weights)
+    presetWeightsSeqRef.current += 1
+    setPresetWeightsToApply({ weights: preset.weights, seq: presetWeightsSeqRef.current })
     setComparisonResult(null)
   }
 
