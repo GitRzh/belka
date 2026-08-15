@@ -5,6 +5,7 @@
 //   - Grouped bar chart (Recharts) with fuel cost + risk collected
 //   - Comparison narration from the LLM
 //   - "Use these weights" button on each card to populate PlanForm weights
+//   - "RECOMMENDED" badge on the preset with the highest risk/fuel efficiency
 //
 // Color rule: grayscale, brightness-only — matching DataQualityBadge.jsx.
 //   Fuel-Conservative = dim/dark gray (#4a4a4e)
@@ -19,6 +20,28 @@ const PRESET_STYLE = {
   'Fuel-Conservative': { color: '#4a4a4e', label: 'Fuel-Conservative' },
   'Balanced':          { color: '#8a8a8e', label: 'Balanced' },
   'Risk-Aggressive':   { color: '#f2f2f0', label: 'Risk-Aggressive' },
+}
+
+// Returns the preset with the highest risk/fuel efficiency
+// (total_risk_collected / total_fuel_cost_km_s), or null if:
+//   - all presets have total_fuel_cost_km_s <= 0, or
+//   - two or more presets tie exactly on efficiency.
+// Exported for direct unit testing.
+export function findRecommendedPreset(presets) {
+  const eligible = presets.filter(p => p.total_fuel_cost_km_s > 0)
+  if (eligible.length === 0) return null
+
+  const withEff = eligible.map(p => ({
+    preset: p,
+    efficiency: p.total_risk_collected / p.total_fuel_cost_km_s,
+  }))
+
+  const maxEff = Math.max(...withEff.map(e => e.efficiency))
+  const winners = withEff.filter(e => e.efficiency === maxEff)
+
+  // Tie → no recommendation
+  if (winners.length !== 1) return null
+  return winners[0].preset
 }
 
 // Chart data transformer: one row per preset, two metrics per row.
@@ -56,6 +79,7 @@ export default function ComparisonPanel({ result, onUsePlan, onClose }) {
 
   const { presets, comparison_narration } = result
   const chartData = buildChartData(presets)
+  const recommendedPreset = findRecommendedPreset(presets)
 
   return (
     <div className="reasoning" style={{ paddingBottom: 16 }}>
@@ -88,8 +112,30 @@ export default function ComparisonPanel({ result, onUsePlan, onClose }) {
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 6,
+                position: 'relative',
               }}
             >
+              {recommendedPreset?.label === preset.label && (
+                <span
+                  data-testid={`recommended-badge-${preset.label}`}
+                  style={{
+                    position: 'absolute',
+                    top: 6,
+                    right: 6,
+                    fontFamily: 'var(--font-display)',
+                    fontSize: 9,
+                    fontWeight: 600,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.06em',
+                    background: 'var(--c-ink)',
+                    color: 'var(--c-panel)',
+                    padding: '1px 4px',
+                    borderRadius: 2,
+                  }}
+                >
+                  Recommended
+                </span>
+              )}
               <div style={{
                 fontFamily: 'var(--font-display)',
                 fontWeight: 600,

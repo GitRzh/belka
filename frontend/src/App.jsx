@@ -415,6 +415,7 @@ export default function App() {
   const MAX_HISTORY = 20
 
   async function handleGeneratePlan(payload) {
+    setComparisonResult(null)
     setPlanning(true)
     setFormError(null)
     setNaivePlan(null)
@@ -460,12 +461,13 @@ export default function App() {
 
   function handleUsePlan(preset) {
     // "Use these weights" — populate PlanForm's weights_json textarea with this
-    // preset's weights and close the comparison panel. Does NOT fabricate a result,
-    // touch History, set plan, or navigate to workspace. The user then manually
-    // clicks Generate Plan to produce a real result.
+    // preset's weights. Does NOT close the comparison panel, fabricate a result,
+    // touch History, set plan, or navigate to workspace. The panel stays open so
+    // the user can compare other presets before generating. The panel closes when
+    // Generate Plan is clicked (handleGeneratePlan calls setComparisonResult(null))
+    // or when the user clicks the explicit Close button.
     presetWeightsSeqRef.current += 1
     setPresetWeightsToApply({ weights: preset.weights, seq: presetWeightsSeqRef.current })
-    setComparisonResult(null)
   }
 
   // Helper: append a new replan tab (drops oldest replan if over cap; Plan always stays).
