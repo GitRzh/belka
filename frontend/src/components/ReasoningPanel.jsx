@@ -11,10 +11,15 @@
 //                        the normal (successful-plan) case
 //   onApplyProposal    — callback(proposal) invoked when the user clicks Apply
 //   submitting         — bool, disables buttons while a replan is in flight
-//   globeRef           — optional ref with .flyTo(lon, lat, altKm) — when provided,
+//   globeRef           — optional ref with .flyTo(lon, lat, altKm) and
+//                        .flyToLeg(fromDebris, toDebris) — when provided,
 //                        leg-index numbers become clickable to pan the globe camera
 //   debrisField        — optional debris array — needed alongside globeRef to resolve
 //                        step label "NAME (norad_id)" to actual coordinates
+//   onLegClick(step, fromNoradId, toNoradId, legIndex) — optional callback fired when
+//                        a leg-index button is clicked (in addition to the flyTo pan)
+//   onDebrisSelect(debris) — optional callback fired when a debris name in the
+//                        manifest is clicked (mirrors App.handleDebrisSelect)
 
 import DataQualityBadge from './DataQualityBadge.jsx'
 
@@ -25,7 +30,7 @@ function noradIdFromLabel(label) {
   return m ? Number(m[1]) : null
 }
 
-export default function ReasoningPanel({ plan, explanationOverride, proposals, onApplyProposal, submitting, globeRef, debrisField }) {
+export default function ReasoningPanel({ plan, explanationOverride, proposals, onApplyProposal, submitting, globeRef, debrisField, onLegClick, onDebrisSelect }) {
   if (!plan) return null
 
   const showProposals = Array.isArray(proposals) && proposals.length > 0
@@ -87,22 +92,37 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
             <tbody>
               {plan.step_breakdown.map((step, i) => {
                 // Resolve step.to → debris object → flyTo coords when globeRef present.
-                const toNoradId = noradIdFromLabel(step.to)
+                const toNoradId   = noradIdFromLabel(step.to)
+                const fromNoradId = noradIdFromLabel(step.from)  // null for depot
                 const toDebris = (globeRef && debrisField && toNoradId != null)
                   ? debrisField.find(d => d.norad_id === toNoradId)
                   : null
+                // Resolve debris objects for name-click (debrisField may be absent)
+                const fromDebris = (debrisField && fromNoradId != null)
+                  ? debrisField.find(d => d.norad_id === fromNoradId)
+                  : null
+                const toDebrisForName = (debrisField && toNoradId != null)
+                  ? debrisField.find(d => d.norad_id === toNoradId)
+                  : null
+                // Effective from/to IDs for leg explanation: -1 for depot
+                const effectiveFromId = fromNoradId ?? -1
+                const effectiveToId   = toNoradId
                 return (
                 <tr key={i}>
                   <td className="leg-index">
-                    {toDebris ? (
+                    {(toDebris || (onLegClick && effectiveToId != null)) ? (
                       <button
                         className="leg-index-btn"
-                        title={`Pan to ${toDebris.name ?? step.to}`}
-                        onClick={() => globeRef.current?.flyTo(
-                          toDebris.longitude,
-                          toDebris.latitude,
-                          toDebris.altitude_km,
-                        )}
+                        title={`Frame leg ${i + 1} · Click for leg detail`}
+                        onClick={() => {
+                          // Frame both FROM and TO debris together.
+                          // fromDebris is null for depot legs — flyToLeg handles that gracefully.
+                          globeRef?.current?.flyToLeg(fromDebris, toDebris ?? toDebrisForName)
+                          // New: open leg detail panel
+                          if (onLegClick && effectiveToId != null) {
+                            onLegClick(step, effectiveFromId, effectiveToId, i + 1)
+                          }
+                        }}
                       >
                         {String(i + 1).padStart(2, '0')}
                       </button>
@@ -110,8 +130,34 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
                       String(i + 1).padStart(2, '0')
                     )}
                   </td>
-                  <td>{step.from}</td>
-                  <td>{step.to}</td>
+                  <td>
+                    {fromDebris && onDebrisSelect ? (
+                      <button
+                        className="manifest-debris-name-btn"
+                        title={`Open detail for ${fromDebris.name ?? step.from}`}
+                        onClick={() => {
+                          globeRef?.current?.flyTo(fromDebris.longitude, fromDebris.latitude, fromDebris.altitude_km)
+                          onDebrisSelect(fromDebris)
+                        }}
+                      >
+                        {step.from}
+                      </button>
+                    ) : step.from}
+                  </td>
+                  <td>
+                    {toDebrisForName && onDebrisSelect ? (
+                      <button
+                        className="manifest-debris-name-btn"
+                        title={`Open detail for ${toDebrisForName.name ?? step.to}`}
+                        onClick={() => {
+                          globeRef?.current?.flyTo(toDebrisForName.longitude, toDebrisForName.latitude, toDebrisForName.altitude_km)
+                          onDebrisSelect(toDebrisForName)
+                        }}
+                      >
+                        {step.to}
+                      </button>
+                    ) : step.to}
+                  </td>
                   <td>{step.delta_v_km_s}</td>
                   <td>{step.arrival_time_days ?? '—'}</td>
                   <td>{step.raan_drift_deg ?? '—'}</td>

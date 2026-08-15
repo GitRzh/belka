@@ -1957,3 +1957,106 @@ h1, h2, h3 {
 .leg-index-btn:hover {
   color: var(--c-ink);
 }
+
+/* ---------------------------------------------------------------------
+   Leg Detail Panel (Decision Provenance Inspector — Feature 2)
+   Shares .debris-modal positioning and header/body tokens.
+   .leg-panel overrides only what differs: panel is narrower and has
+   no pin button, no tab bar.
+   --------------------------------------------------------------------- */
+
+/* FROM → TO side-by-side endpoint cards */
+.leg-panel-endpoints {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 2px;
+  padding: 10px 0 6px;
+}
+
+.leg-panel-endpoints-arrow {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--c-steel);
+  padding-top: 18px;
+  flex-shrink: 0;
+}
+
+.leg-panel-endpoint-card {
+  flex: 1;
+  min-width: 0;
+  background: var(--c-panel-raised);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.leg-panel-endpoint-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--c-steel);
+  margin-bottom: 2px;
+}
+
+.leg-panel-endpoint-name {
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leg-panel-endpoint-norad {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+}
+
+.leg-panel-endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.leg-panel-endpoint-age {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--c-steel);
+}
+
+.leg-panel-endpoint-risk {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--c-steel);
+}
+
+/* Manifest debris name — clickable link style (opens DebrisInfoModal) */
+.manifest-debris-name-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-ink);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--c-line);
+  text-underline-offset: 2px;
+  transition: text-decoration-color 0.12s ease, color 0.12s ease;
+  line-height: inherit;
+  word-break: break-word;
+}
+.manifest-debris-name-btn:hover {
+  color: var(--c-signal);
+  text-decoration-color: var(--c-steel);
+}

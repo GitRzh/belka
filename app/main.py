@@ -1757,3 +1757,151 @@ def naive_route(
         "longitude": 0.0,
     }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Leg explanation cache and endpoint (Feature 2 — Decision Provenance Inspector)
+# ---------------------------------------------------------------------------
+
+# In-memory cache keyed by (from_norad_id, to_norad_id) tuple.
+# -1 is used as the depot sentinel (matches _build_depot_node in optimizer.py).
+# Bounded by (number of visited nodes)^2 per session; in practice a handful of
+# entries per session.  Never invalidated: orbital costs are deterministic for a
+# given debris field snapshot.
+_leg_explanation_cache: dict[tuple[int, int], dict] = {}
+
+
+@app.get("/leg/{from_norad_id}/{to_norad_id}/explanation")
+def leg_explanation(from_norad_id: int, to_norad_id: int,
+                    delta_v_km_s: float = 0.0,
+                    fuel_saved_km_s: float = 0.0,
+                    recommended_wait_days: int = 0,
+                    raan_drift_deg: float = 0.0,
+                    arrival_time_days: float = 0.0):
+    """Decision Provenance Inspector — why does this transfer leg cost what it does?
+
+    Returns a short LLM-generated paragraph explaining the delta-v cost and any
+    J2 passive wait recommendation for the leg from *from_norad_id* to *to_norad_id*.
+    Leg metrics are supplied as query parameters so the frontend can pass the
+    already-computed step_breakdown values without a second server-side solve.
+
+    Caches server-side by (from_norad_id, to_norad_id) pair.
+    Uses openai/gpt-oss-20b — same model/cost class as the per-object reasoning
+    endpoint, intentionally distinct from the 120b model used for route briefings.
+    Never returns 500: on LLM failure, explanation_unavailable=True is set.
+
+    Both endpoint objects are looked up in the debris field; from_norad_id may be
+    -1 for the depot sentinel (no object data available for depot).
+    """
+    cache_key = (from_norad_id, to_norad_id)
+    if cache_key in _leg_explanation_cache:
+        return _leg_explanation_cache[cache_key]
+
+    scored = _get_scored_field()
+
+    # Look up both endpoints.  Depot (norad_id == -1) has no debris record.
+    from_obj = next((o for o in scored if o["norad_id"] == from_norad_id), None)
+    to_obj   = next((o for o in scored if o["norad_id"] == to_norad_id),   None)
+
+    if to_obj is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"to_norad_id {to_norad_id} not found in current 700-1000km band field",
+        )
+
+    # Build human-readable endpoint descriptions for the prompt.
+    def _obj_desc(obj: Optional[dict], label: str) -> str:
+        if obj is None:
+            return f"{label}: depot/spacecraft start (no orbital debris record)"
+        return (
+            f"{label}: {obj.get('name', 'unknown')} (NORAD {obj['norad_id']})\n"
+            f"  altitude={obj.get('altitude_km')} km, "
+            f"inclination={obj.get('inclination_deg')}°, "
+            f"RAAN={obj.get('raan_deg', 0.0):.2f}°\n"
+            f"  risk_score={obj.get('risk_score')}, "
+            f"data_quality={obj.get('data_quality', 'unknown')}, "
+            f"object_type={obj.get('object_type', 'unknown')}"
+        )
+
+    from_desc = _obj_desc(from_obj, "FROM")
+    to_desc   = _obj_desc(to_obj,   "TO")
+
+    wait_line = ""
+    if recommended_wait_days > 0 and fuel_saved_km_s > 0:
+        wait_line = (
+            f"\n  J2 passive wait: {recommended_wait_days} day(s) recommended, "
+            f"saving {fuel_saved_km_s} km/s by allowing nodal precession to reduce "
+            f"the RAAN difference before the transfer burn."
+        )
+
+    raan_line = ""
+    if abs(raan_drift_deg) > 0.01:
+        raan_line = f"\n  RAAN drift over elapsed mission time: {raan_drift_deg:.4f}°"
+
+    prompt = (
+        "You are a mission-analysis assistant for an orbital debris removal programme. "
+        "Write a single plain-English paragraph (3-5 sentences) explaining WHY this "
+        "orbital transfer leg costs what it does, grounded ONLY in the orbital signals "
+        "below. Use relative terms only — do NOT state specific object masses, materials, "
+        "or any physical property not derivable from the signals. Reference the J2 "
+        "passive nodal drift wait if recommended_wait_days > 0. Reference data_quality "
+        "of the destination if it is 'aging' or 'stale', noting that trajectory "
+        "uncertainty may affect the real cost. Do not speculate beyond the provided data. "
+        "Output only the paragraph — no JSON, no markdown, no bullet points.\n\n"
+        f"Leg metrics:\n"
+        f"  delta_v_km_s           = {delta_v_km_s} km/s\n"
+        f"  recommended_wait_days  = {recommended_wait_days} days\n"
+        f"  fuel_saved_km_s        = {fuel_saved_km_s} km/s{wait_line}\n"
+        f"  raan_drift_deg         = {raan_drift_deg:.4f}°{raan_line}\n"
+        f"  arrival_time_days      = {arrival_time_days:.4f} days into mission\n\n"
+        f"Endpoint objects:\n{from_desc}\n{to_desc}"
+    )
+
+    explanation_text: Optional[str] = None
+    try:
+        groq_resp = _groq_client().chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            timeout=20.0,
+        )
+        explanation_text = (groq_resp.choices[0].message.content or "").strip()
+        logger.info(
+            "[leg-explanation] (%d->%d) served (model=openai/gpt-oss-20b)",
+            from_norad_id, to_norad_id,
+        )
+    except Exception as groq_err:
+        logger.error(
+            "[leg-explanation] Groq failed for (%d->%d): %s — returning explanation_unavailable",
+            from_norad_id, to_norad_id, groq_err,
+        )
+
+    # Build response — always succeeds even if LLM failed
+    def _endpoint_summary(obj: Optional[dict], is_depot: bool) -> dict:
+        if is_depot or obj is None:
+            return {"norad_id": from_norad_id, "name": "Depot (spacecraft start)", "is_depot": True}
+        return {
+            "norad_id":        obj["norad_id"],
+            "name":            obj.get("name"),
+            "data_quality":    obj.get("data_quality", "unknown"),
+            "epoch_age_days":  obj.get("epoch_age_days"),
+            "risk_score":      obj.get("risk_score"),
+            "is_depot":        False,
+        }
+
+    response: dict = {
+        "from_norad_id":          from_norad_id,
+        "to_norad_id":            to_norad_id,
+        "from_obj":               _endpoint_summary(from_obj, from_norad_id == -1),
+        "to_obj":                 _endpoint_summary(to_obj,   False),
+        "delta_v_km_s":           delta_v_km_s,
+        "fuel_saved_km_s":        fuel_saved_km_s,
+        "recommended_wait_days":  recommended_wait_days,
+        "raan_drift_deg":         raan_drift_deg,
+        "arrival_time_days":      arrival_time_days,
+        "explanation":            explanation_text,
+        "explanation_unavailable": explanation_text is None,
+    }
+
+    _leg_explanation_cache[cache_key] = response
+    return response

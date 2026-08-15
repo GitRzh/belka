@@ -82,4 +82,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  getLegExplanation: (fromNoradId, toNoradId, step = {}) => {
+    const qs = new URLSearchParams({
+      delta_v_km_s:           step.delta_v_km_s           ?? 0,
+      fuel_saved_km_s:        step.fuel_saved_km_s         ?? 0,
+      recommended_wait_days:  step.recommended_wait_days   ?? 0,
+      raan_drift_deg:         step.raan_drift_deg          ?? 0,
+      arrival_time_days:      step.arrival_time_days       ?? 0,
+    }).toString()
+    return request(`/leg/${fromNoradId}/${toNoradId}/explanation?${qs}`)
+  },
 }

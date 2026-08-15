@@ -1,6 +1,7 @@
 import { Fragment, useState, useEffect, useRef, useMemo } from 'react'
 import DebrisGlobe from './components/DebrisGlobe.jsx'
 import DebrisInfoModal from './components/DebrisInfoModal.jsx'
+import LegDetailPanel from './components/LegDetailPanel.jsx'
 import MissionClock from './components/MissionClock.jsx'
 import PlanForm from './components/PlanForm.jsx'
 import ReasoningPanel from './components/ReasoningPanel.jsx'
@@ -79,7 +80,7 @@ function FilterDropup({ filter, onChange, onClose }) {
 
 // Render the full detail view for a single history entry.
 // Extracted so it can be used in Workspace without duplication.
-function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, replanning, onApplyProposal, globeRef, debrisField }) {
+function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, replanning, onApplyProposal, globeRef, debrisField, onLegClick, onDebrisSelect }) {
   if (entry.status === 'running') {
     return <p className="history-summary" style={{ marginTop: 8 }}>Running…</p>
   }
@@ -137,6 +138,8 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
             submitting={replanning}
             globeRef={globeRef}
             debrisField={debrisField}
+            onLegClick={onLegClick}
+            onDebrisSelect={onDebrisSelect}
           />
         </div>
       ) : (
@@ -149,6 +152,8 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
               submitting={replanning}
               globeRef={globeRef}
               debrisField={debrisField}
+              onLegClick={onLegClick}
+              onDebrisSelect={onDebrisSelect}
             />
           )}
           {entry.status === 'done' && entry.kind === 'replan' && (
@@ -178,7 +183,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                   <dd>{entry.result.diff.risk_delta > 0 ? '+' : ''}{entry.result.diff.risk_delta}</dd>
                 </dl>
               )}
-              <ReasoningPanel plan={entry.result.new_plan} globeRef={globeRef} debrisField={debrisField} />
+              <ReasoningPanel plan={entry.result.new_plan} globeRef={globeRef} debrisField={debrisField} onLegClick={onLegClick} onDebrisSelect={onDebrisSelect} />
             </div>
           )}
           {entry.status === 'done' && entry.kind === 'mission_cost' && (
@@ -344,6 +349,10 @@ export default function App() {
 
   const [pinnedDebris, setPinnedDebris] = useState(new Map())
   const [activeDebrisId, setActiveDebrisId] = useState(null)
+
+  // activeLeg: { step, fromNoradId, toNoradId, legIndex } | null
+  // Populated when a user clicks a manifest leg-index button.
+  const [activeLeg, setActiveLeg] = useState(null)
 
   const [plan, setPlan] = useState(null)
   const [naivePlan, setNaivePlan] = useState(null)
@@ -609,10 +618,22 @@ export default function App() {
 
   function handleDebrisSelect(debris) {
     setActiveDebrisId(debris.norad_id)
+    // Opening a debris panel supersedes the leg panel to avoid z-index conflicts.
+    setActiveLeg(null)
   }
 
   function handleDebrisClose() {
     setActiveDebrisId(null)
+  }
+
+  function handleLegClick(step, fromNoradId, toNoradId, legIndex) {
+    setActiveLeg({ step, fromNoradId, toNoradId, legIndex })
+    // Close the debris modal if open so the two panels don't overlap.
+    setActiveDebrisId(null)
+  }
+
+  function handleLegClose() {
+    setActiveLeg(null)
   }
 
   function handleDebrisPin(debris) {
@@ -993,6 +1014,17 @@ export default function App() {
             )
           })()}
 
+          {/* Leg detail panel (Decision Provenance Inspector) */}
+          {activeLeg !== null && (
+            <LegDetailPanel
+              step={activeLeg.step}
+              fromNoradId={activeLeg.fromNoradId}
+              toNoradId={activeLeg.toNoradId}
+              legIndex={activeLeg.legIndex}
+              onClose={handleLegClose}
+            />
+          )}
+
           {/* Pinned tab bar */}
           {pinnedDebris.size > 0 && (
             <div className="debris-tab-bar">
@@ -1184,6 +1216,8 @@ export default function App() {
                     onReplan={handleWorkspaceReplan}
                     onApplyProposal={handleApplyProposal}
                     replanning={replanning}
+                    onLegClick={handleLegClick}
+                    onDebrisSelect={handleDebrisSelect}
                   />
                 ) : (
                   <p className="workspace-empty-label" data-testid="workspace-empty-label">

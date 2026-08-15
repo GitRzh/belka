@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
 import { Viewer, Entity, PolylineGraphics, PointGraphics } from 'resium'
-import { Cartesian3, Color, Credit, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
+import { BoundingSphere, Cartesian3, Color, Credit, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
 
 // Spherical linear interpolation between two Cartesian3 positions.
 // Returns `steps` points from `a` up to (but not including) `b`.
@@ -151,6 +151,50 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
         destination: Cartesian3.fromDegrees(lon, lat, altKm * 1000 + 2_000_000),
         duration: 1.5,
       })
+    },
+
+    /** Fly the camera to frame two debris positions simultaneously.
+     *  Computes a BoundingSphere that encloses both Cartesian3 points with a
+     *  generous radius so neither dot is clipped at the edge, then calls
+     *  camera.flyToBoundingSphere().  Falls back to single-point flyTo on the
+     *  "to" position when fromDebris is null (depot leg). */
+    flyToLeg(fromDebris, toDebris) {
+      const viewer = viewerRef.current?.cesiumElement
+      if (!viewer || !toDebris) return
+
+      const toPos = Cartesian3.fromDegrees(
+        toDebris.longitude,
+        toDebris.latitude,
+        toDebris.altitude_km * 1000,
+      )
+
+      // Depot leg (fromDebris is null): fall back to single-point view on TO.
+      if (!fromDebris) {
+        viewer.camera.flyToBoundingSphere(
+          new BoundingSphere(toPos, 800_000),
+          { duration: 1.5 },
+        )
+        return
+      }
+
+      const fromPos = Cartesian3.fromDegrees(
+        fromDebris.longitude,
+        fromDebris.latitude,
+        fromDebris.altitude_km * 1000,
+      )
+
+      // Center = midpoint of the two Cartesian3 positions.
+      const center = Cartesian3.midpoint(fromPos, toPos, new Cartesian3())
+
+      // Radius = half the distance between the two points, plus a 20% margin
+      // so both dots sit comfortably inside the frame rather than at the edge.
+      const separation = Cartesian3.distance(fromPos, toPos)
+      const radius = Math.max(separation / 2 * 1.2, 400_000) // min 400 km view
+
+      viewer.camera.flyToBoundingSphere(
+        new BoundingSphere(center, radius),
+        { duration: 1.5 },
+      )
     },
 
     /** Place a billboard pin entity at the given position, replacing any prior entity with same id. */
