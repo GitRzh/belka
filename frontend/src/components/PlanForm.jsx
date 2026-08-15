@@ -6,7 +6,7 @@ import { api } from '../api'
 
 const REMOVAL_METHOD_FILTER_OPTIONS = ['', 'robotic_arm_or_net_capture', 'net_capture']
 
-export default function PlanForm({ onSubmit, onCompare, onChange, submitting, comparing, globeRef }) {
+export default function PlanForm({ onSubmit, onCompare, onChange, submitting, comparing, globeRef, presetWeights }) {
   // 'site' | 'raw' — which start-position mode is active
   const [startMode, setStartMode] = useState('site')
 
@@ -77,6 +77,14 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
       // silent — pin is best-effort visualisation; don't block the form
     }
   }
+
+  // When a preset's weights are applied from the comparison panel, populate
+  // weights_json. Only weights_json changes — all other fields are untouched.
+  useEffect(() => {
+    if (presetWeights != null) {
+      updateAdvanced('weights_json', JSON.stringify(presetWeights, null, 2))
+    }
+  }, [presetWeights])
 
   useEffect(() => {
     api.getLaunchSites()

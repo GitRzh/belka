@@ -4,7 +4,7 @@
 //   - Stat cards (Fuel-Conservative / Balanced / Risk-Aggressive)
 //   - Grouped bar chart (Recharts) with fuel cost + risk collected
 //   - Comparison narration from the LLM
-//   - "Use this plan" button on each card to commit to History
+//   - "Use these weights" button on each card to populate PlanForm weights
 //
 // Color rule: grayscale, brightness-only — matching DataQualityBadge.jsx.
 //   Fuel-Conservative = dim/dark gray (#4a4a4e)
@@ -129,7 +129,7 @@ export default function ComparisonPanel({ result, onUsePlan, onClose }) {
                 }}
                 onClick={() => onUsePlan?.(preset)}
               >
-                Use this plan
+                Use these weights
               </button>
             </div>
           )

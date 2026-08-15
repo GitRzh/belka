@@ -377,6 +377,7 @@ export default function App() {
   const [replanning, setReplanning] = useState(false)
   const [comparing, setComparing] = useState(false)
   const [comparisonResult, setComparisonResult] = useState(null)
+  const [presetWeightsToApply, setPresetWeightsToApply] = useState(null)
   const [formError, setFormError] = useState(null)
 
   // Visualization arrow panel open/closed state
@@ -453,43 +454,12 @@ export default function App() {
     }
   }
 
-  function handleUsePlan(preset, payload) {
-    // "Use this plan" — commit chosen preset's route to History as a 'plan' entry.
-    // route_details from the preset become the canonical result, shaped like a
-    // normal /plan response so EntryDetailView renders it with ReasoningPanel.
-    const id = crypto.randomUUID()
-    const fakeResult = {
-      route: preset.route_details.map(d => d.name ? `${d.name} (${d.norad_id})` : String(d.norad_id)),
-      route_details:         preset.route_details,
-      visited_count:         preset.visited_count,
-      total_fuel_cost_km_s:  preset.total_fuel_cost_km_s,
-      total_risk_collected:  preset.total_risk_collected,
-      fuel_budget_km_s:      payload?.fuel_budget_km_s,
-      fuel_used_fraction:    payload?.fuel_budget_km_s
-        ? preset.total_fuel_cost_km_s / payload.fuel_budget_km_s
-        : 0,
-      pool_size_used:        preset.visited_count,
-      skipped_count:         0,
-      explanation: `${preset.label} preset selected from comparison. Weights: proximity=${preset.weights.proximity}, lifetime=${preset.weights.lifetime}, size=${preset.weights.size}.`,
-    }
-    const entryParams = {
-      ...(payload ?? {}),
-      weights: preset.weights,
-    }
-    setHistory(h => [...h, {
-      id,
-      kind: 'plan',
-      status: 'done',
-      params: entryParams,
-      result: fakeResult,
-      error: null,
-    }].slice(-MAX_HISTORY))
-    setPlan(fakeResult)
-    setRouteMode('ai')
-    setRouteTabs([{ label: 'Plan', route: fakeResult.route ?? [], type: 'plan' }])
-    setActiveRouteTabIdx(0)
-    setActiveWorkspaceId(id)
-    setActivePanel('workspace')
+  function handleUsePlan(preset) {
+    // "Use these weights" — populate PlanForm's weights_json textarea with this
+    // preset's weights and close the comparison panel. Does NOT fabricate a result,
+    // touch History, set plan, or navigate to workspace. The user then manually
+    // clicks Generate Plan to produce a real result.
+    setPresetWeightsToApply(preset.weights)
     setComparisonResult(null)
   }
 
@@ -1227,6 +1197,7 @@ export default function App() {
                   submitting={planning}
                   comparing={comparing}
                   globeRef={globeRef}
+                  presetWeights={presetWeightsToApply}
                 />
 
                 {/* ComparisonPanel — takes over the right column when a compare result is ready.
@@ -1242,7 +1213,7 @@ export default function App() {
                   <div style={{ marginTop: 12 }}>
                     <ComparisonPanel
                       result={comparisonResult}
-                      onUsePlan={(preset) => handleUsePlan(preset, comparePayloadRef.current)}
+                      onUsePlan={(preset) => handleUsePlan(preset)}
                       onClose={() => setComparisonResult(null)}
                     />
                   </div>
