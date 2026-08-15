@@ -37,6 +37,17 @@ except ImportError:
 DEFAULT_NETS_CARRIED = 1  # RemoveDEBRIS's actual flight history: exactly one net carried.
 
 SOLVER_TIME_LIMIT_SECONDS = 5
+# When nets_carried > DEFAULT_NETS_CARRIED (i.e. > 1), the NetCapacity
+# dimension adds a second active constraint to the search space.  Under
+# GUIDED_LOCAL_SEARCH this can cause the solver to miss solutions that were
+# found at the tighter cap -- most visibly, a 5s search at cap=3 can return
+# a strictly worse objective value than the cap=1 solution that was already
+# a legal move in the relaxed space.  The confirmed failure mode (original
+# failing pytest run: cap=1 obj=987,310; cap=3 obj=995,644 -- worse by 8,334
+# units despite having more freedom) came from a real Celestrak pool.
+# A longer budget gives GLS more iterations to escape the initial local
+# minimum introduced by the extra dimension.
+SOLVER_TIME_LIMIT_SECONDS_EXTRA_NETS = 15
 # Dry-run calls only need visited_count > 0; OR-Tools returns as soon as it
 # finds any feasible solution, so 1 s is enough to confirm feasibility
 # without finding the optimal route.  Named constant so main.py's
@@ -333,7 +344,16 @@ def optimize_route(
     search_params.local_search_metaheuristic = (
         routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     )
-    search_params.time_limit.FromSeconds(time_limit_seconds)
+    # Escalate the time limit when nets_carried > 1 (the default/baseline).
+    # A second active dimension (NetCapacity) widens the search space and
+    # can cause GLS to miss solutions found at cap=1 within 5s.  Only apply
+    # this when the caller did not already supply an explicit override (i.e.
+    # time_limit_seconds is still at the module default), so dry-run calls
+    # that pass DRY_RUN_TIME_LIMIT_SECONDS are never affected.
+    effective_time_limit = time_limit_seconds
+    if nets_carried > DEFAULT_NETS_CARRIED and time_limit_seconds == SOLVER_TIME_LIMIT_SECONDS:
+        effective_time_limit = SOLVER_TIME_LIMIT_SECONDS_EXTRA_NETS
+    search_params.time_limit.FromSeconds(effective_time_limit)
 
     solution = routing.SolveWithParameters(search_params)
 
