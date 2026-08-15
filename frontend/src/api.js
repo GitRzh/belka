@@ -71,6 +71,12 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  compare: (payload) =>
+    request('/compare', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   replan: (payload) =>
     request('/replan', {
       method: 'POST',

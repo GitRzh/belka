@@ -6,7 +6,7 @@ import { api } from '../api'
 
 const REMOVAL_METHOD_FILTER_OPTIONS = ['', 'robotic_arm_or_net_capture', 'net_capture']
 
-export default function PlanForm({ onSubmit, onChange, submitting, globeRef }) {
+export default function PlanForm({ onSubmit, onCompare, onChange, submitting, comparing, globeRef }) {
   // 'site' | 'raw' — which start-position mode is active
   const [startMode, setStartMode] = useState('site')
 
@@ -104,6 +104,31 @@ export default function PlanForm({ onSubmit, onChange, submitting, globeRef }) {
 
   function updateAdvanced(field, value) {
     setAdvanced((prev) => ({ ...prev, [field]: value }))
+  }
+
+  function handleCompare(e) {
+    e.preventDefault()
+    // Build the same payload as handleSubmit but dispatch to onCompare.
+    const budgetNum = Number(required.fuel_budget_km_s)
+    if (!required.fuel_budget_km_s || !Number.isFinite(budgetNum) || budgetNum <= 0) {
+      alert('Fuel budget must be a positive number (e.g. 2.5 km/s)')
+      return
+    }
+    const payload = { fuel_budget_km_s: budgetNum }
+    if (startMode === 'site') {
+      payload.launch_site = siteForm.launch_site
+      if (siteForm.inclination_deg !== '') payload.inclination_deg = Number(siteForm.inclination_deg)
+    } else {
+      payload.start_altitude_km     = Number(required.start_altitude_km)
+      payload.start_inclination_deg = Number(required.start_inclination_deg)
+    }
+    if (advanced.pool_size)             payload.pool_size             = Number(advanced.pool_size)
+    if (advanced.nets_carried)          payload.nets_carried          = Number(advanced.nets_carried)
+    if (advanced.max_wait_days)         payload.max_wait_days         = Number(advanced.max_wait_days)
+    if (advanced.removal_method_filter) payload.removal_method_filter = advanced.removal_method_filter
+    if (advanced.start_raan_deg !== '') payload.start_raan_deg        = Number(advanced.start_raan_deg)
+    // weights intentionally omitted — /compare always uses its own 3 fixed presets.
+    onCompare?.(payload)
   }
 
   function handleSubmit(e) {
@@ -391,9 +416,20 @@ export default function PlanForm({ onSubmit, onChange, submitting, globeRef }) {
 
       </div>{/* end .form-grid */}
 
-      <button type="submit" className="btn btn-primary" disabled={submitting} style={{ width: '100%', marginTop: 4 }}>
-        {submitting ? 'Generating plan…' : 'Generate plan'}
-      </button>
+      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+        <button type="submit" className="btn btn-primary" disabled={submitting || comparing} style={{ flex: 1 }}>
+          {submitting ? 'Generating plan…' : 'Generate plan'}
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={submitting || comparing}
+          style={{ flex: 1 }}
+          onClick={handleCompare}
+        >
+          {comparing ? 'Running 3 optimizer passes…' : 'Compare Presets'}
+        </button>
+      </div>
     </form>
   )
 }

@@ -381,9 +381,10 @@ def test_explanation_cache_limits_llm_calls(monkeypatch):
                 def create(**kwargs):
                     return fake_groq_call(**kwargs)
 
-    # Clear the module-level cache so this test starts clean regardless of
-    # run order (other tests / the scored_field fixture may have warmed it).
+    # Clear the module-level caches so this test starts clean regardless of
+    # run order (other tests / the scored_field fixture may have warmed them).
     main_module._REMOVAL_METHOD_EXPLANATION_CACHE.clear()
+    main_module._scored_field_cache.clear()  # force re-run of enrichment so monkeypatched LLM fires
     monkeypatch.setattr("app.main._groq_client", lambda: FakeClient())
 
     field = _get_scored_field()

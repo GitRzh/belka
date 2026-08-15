@@ -14,6 +14,7 @@
     "cesium": "1.143.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "recharts": "^3.10.1",
     "resium": "^1.24.0"
   },
   "devDependencies": {

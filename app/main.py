@@ -15,12 +15,14 @@ Pipeline for /plan:
                                for_ortools directly -- optimizer.py already
                                owns that.
 """
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -1010,6 +1012,134 @@ def plan(req: PlanRequest):
     if result.get("visited_count") == 0:
         result["proposals"] = _propose_fixes(result, req)
     return result
+
+
+# ---------------------------------------------------------------------------
+# /compare — Trade-off Plan Comparator
+# ---------------------------------------------------------------------------
+
+_COMPARE_PRESETS: list[dict[str, Any]] = [
+    {"label": "Fuel-Conservative", "weights": {"proximity": 0.70, "lifetime": 0.15, "size": 0.15}},
+    {"label": "Balanced",          "weights": DEFAULT_WEIGHTS},                   # {"proximity":0.45,"lifetime":0.30,"size":0.25}
+    {"label": "Risk-Aggressive",   "weights": {"proximity": 0.15, "lifetime": 0.45, "size": 0.40}},
+]
+
+# Cache: keyed by sha256 of (sorted preset weight tuples + serialised request params).
+# Caches only the comparison_narration text; optimizer runs are never cached here.
+_compare_narration_cache: dict[str, str] = {}
+
+
+def _compare_cache_key(req: "PlanRequest") -> str:
+    """Stable hash of the 3 fixed preset weight dicts + the incoming request params."""
+    preset_part = json.dumps(
+        [p["weights"] for p in _COMPARE_PRESETS], sort_keys=True
+    )
+    # Exclude fields not relevant to plan output (e.g. user_request_text on replan).
+    req_part = json.dumps({
+        "launch_site":           req.launch_site,
+        "inclination_deg":       req.inclination_deg,
+        "start_altitude_km":     req.start_altitude_km,
+        "start_inclination_deg": req.start_inclination_deg,
+        "start_raan_deg":        req.start_raan_deg,
+        "fuel_budget_km_s":      req.fuel_budget_km_s,
+        "pool_size":             req.pool_size,
+        "nets_carried":          req.nets_carried,
+        "max_wait_days":         req.max_wait_days,
+        "min_saving_km_s":       req.min_saving_km_s,
+        "removal_method_filter": req.removal_method_filter,
+        "max_tle_age_days":      req.max_tle_age_days,
+    }, sort_keys=True)
+    raw = preset_part + "|" + req_part
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _explain_comparison(presets_results: list[dict[str, Any]]) -> Optional[str]:
+    """Single LLM call (openai/gpt-oss-120b) comparing all 3 preset results.
+
+    Called only after all 3 concurrent optimizer runs have finished.
+    Returns None on failure so callers degrade gracefully."""
+    summaries = [
+        {
+            "label":                 pr["label"],
+            "weights":               pr["weights"],
+            "total_fuel_cost_km_s":  pr["total_fuel_cost_km_s"],
+            "total_risk_collected":  pr["total_risk_collected"],
+            "visited_count":         pr["visited_count"],
+        }
+        for pr in presets_results
+    ]
+    prompt = (
+        "You are a mission-planning analyst for an orbital debris removal programme. "
+        "Three route plans were generated using different risk-scoring weight profiles. "
+        "The weights change which debris objects are ranked into the candidate pool -- "
+        "they do NOT directly optimise for fuel. Any fuel difference between presets is "
+        "a side-effect of which objects were selected, not the optimizer targeting fuel. "
+        "Write exactly 2-3 plain-English sentences comparing the three plans: highlight "
+        "the trade-off between fuel cost and risk collected, and explain which preset "
+        "is most suitable for different operator priorities. "
+        "Output only the comparison -- no JSON, no markdown, no preamble.\n\n"
+        + json.dumps(summaries)
+    )
+    try:
+        resp = _groq_client().chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.error("[compare] LLM call failed: %s", exc)
+        return None
+
+
+@app.post("/compare")
+def compare(req: PlanRequest):
+    """Run the 3 fixed weight presets concurrently and return a side-by-side comparison.
+
+    Body: same shape as PlanRequest (weights field is ignored -- always runs the 3
+    fixed presets internally).  The 3 optimize_route() calls run in parallel via a
+    ThreadPoolExecutor so the total wall-clock time is ~5s, not ~15s.
+
+    Response shape:
+      {
+        "presets": [
+          {"label": ..., "weights": ..., "total_fuel_cost_km_s": ...,
+           "total_risk_collected": ..., "visited_count": ..., "route_details": [...]},
+          ...
+        ],
+        "comparison_narration": "..."
+      }
+    """
+    cache_key = _compare_cache_key(req)
+
+    def _run_one_preset(preset: dict[str, Any]) -> dict[str, Any]:
+        preset_req = req.model_copy(update={"weights": preset["weights"]})
+        result = _run_plan(preset_req)
+        return {
+            "label":                preset["label"],
+            "weights":              preset["weights"],
+            "total_fuel_cost_km_s": result.get("total_fuel_cost_km_s", 0.0),
+            "total_risk_collected": result.get("total_risk_collected", 0.0),
+            "visited_count":        result.get("visited_count", 0),
+            "route_details":        result.get("route_details", []),
+        }
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_run_one_preset, p) for p in _COMPARE_PRESETS]
+        presets_results = [f.result() for f in futures]
+
+    # Serve narration from cache if available; otherwise call LLM once.
+    if cache_key in _compare_narration_cache:
+        narration = _compare_narration_cache[cache_key]
+    else:
+        narration = _explain_comparison(presets_results)
+        if narration:
+            _compare_narration_cache[cache_key] = narration
+
+    return {
+        "presets": presets_results,
+        "comparison_narration": narration,
+    }
 
 
 @app.post("/mission-cost")

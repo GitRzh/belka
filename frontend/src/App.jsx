@@ -7,6 +7,7 @@ import PlanForm from './components/PlanForm.jsx'
 import ReasoningPanel from './components/ReasoningPanel.jsx'
 import ReplanInput from './components/ReplanInput.jsx'
 import CustomSelectionSummary from './components/CustomSelectionSummary.jsx'
+import ComparisonPanel from './components/ComparisonPanel.jsx'
 import { api } from './api.js'
 
 const REMOVAL_METHODS = [
@@ -374,6 +375,8 @@ export default function App() {
 
   const [planning, setPlanning] = useState(false)
   const [replanning, setReplanning] = useState(false)
+  const [comparing, setComparing] = useState(false)
+  const [comparisonResult, setComparisonResult] = useState(null)
   const [formError, setFormError] = useState(null)
 
   // Visualization arrow panel open/closed state
@@ -401,6 +404,7 @@ export default function App() {
     setPlan(null)
     setNaivePlan(null)
     setRouteMode('ai')
+    setComparisonResult(null)
   }
 
   const MAX_HISTORY = 20
@@ -428,6 +432,65 @@ export default function App() {
     } finally {
       setPlanning(false)
     }
+  }
+
+  const comparePayloadRef = useRef(null)
+
+  async function handleCompare(payload) {
+    setComparing(true)
+    setFormError(null)
+    setComparisonResult(null)
+    comparePayloadRef.current = payload
+    try {
+      const result = await api.compare(payload)
+      setComparisonResult(result)
+      // Keep parameters panel active so the comparison replaces the form area
+      // (it renders in place of the normal plan output, below the form buttons).
+    } catch (err) {
+      setFormError(err.body?.detail || err.message)
+    } finally {
+      setComparing(false)
+    }
+  }
+
+  function handleUsePlan(preset, payload) {
+    // "Use this plan" — commit chosen preset's route to History as a 'plan' entry.
+    // route_details from the preset become the canonical result, shaped like a
+    // normal /plan response so EntryDetailView renders it with ReasoningPanel.
+    const id = crypto.randomUUID()
+    const fakeResult = {
+      route: preset.route_details.map(d => d.name ? `${d.name} (${d.norad_id})` : String(d.norad_id)),
+      route_details:         preset.route_details,
+      visited_count:         preset.visited_count,
+      total_fuel_cost_km_s:  preset.total_fuel_cost_km_s,
+      total_risk_collected:  preset.total_risk_collected,
+      fuel_budget_km_s:      payload?.fuel_budget_km_s,
+      fuel_used_fraction:    payload?.fuel_budget_km_s
+        ? preset.total_fuel_cost_km_s / payload.fuel_budget_km_s
+        : 0,
+      pool_size_used:        preset.visited_count,
+      skipped_count:         0,
+      explanation: `${preset.label} preset selected from comparison. Weights: proximity=${preset.weights.proximity}, lifetime=${preset.weights.lifetime}, size=${preset.weights.size}.`,
+    }
+    const entryParams = {
+      ...(payload ?? {}),
+      weights: preset.weights,
+    }
+    setHistory(h => [...h, {
+      id,
+      kind: 'plan',
+      status: 'done',
+      params: entryParams,
+      result: fakeResult,
+      error: null,
+    }].slice(-MAX_HISTORY))
+    setPlan(fakeResult)
+    setRouteMode('ai')
+    setRouteTabs([{ label: 'Plan', route: fakeResult.route ?? [], type: 'plan' }])
+    setActiveRouteTabIdx(0)
+    setActiveWorkspaceId(id)
+    setActivePanel('workspace')
+    setComparisonResult(null)
   }
 
   // Helper: append a new replan tab (drops oldest replan if over cap; Plan always stays).
@@ -1159,10 +1222,31 @@ export default function App() {
 
                 <PlanForm
                   onSubmit={handleGeneratePlan}
+                  onCompare={handleCompare}
                   onChange={handleFormChange}
                   submitting={planning}
+                  comparing={comparing}
                   globeRef={globeRef}
                 />
+
+                {/* ComparisonPanel — takes over the right column when a compare result is ready.
+                    Dismissed when the user clicks "Use this plan" or "Close". */}
+                {comparing && !comparisonResult && (
+                  <div style={{ marginTop: 12, padding: '10px', border: '1px solid var(--c-line)', borderRadius: 'var(--radius)' }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--c-steel)' }}>
+                      Running 3 optimizer passes…
+                    </span>
+                  </div>
+                )}
+                {comparisonResult && (
+                  <div style={{ marginTop: 12 }}>
+                    <ComparisonPanel
+                      result={comparisonResult}
+                      onUsePlan={(preset) => handleUsePlan(preset, comparePayloadRef.current)}
+                      onClose={() => setComparisonResult(null)}
+                    />
+                  </div>
+                )}
               </div>
             )}
 
