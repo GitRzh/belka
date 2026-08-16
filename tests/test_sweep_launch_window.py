@@ -531,3 +531,203 @@ class TestLaunchDateGuardrails:
         epoch = main_module._debris_epoch()
         assert epoch.tzinfo is not None
         assert isinstance(epoch, datetime)
+
+
+# ---------------------------------------------------------------------------
+# Q1: Frozen epoch under concurrency
+# ---------------------------------------------------------------------------
+
+class TestFrozenEpochUnderConcurrency:
+    """Within one /sweep-launch-window request, every date-offset result must
+    use the SAME _debris_epoch() value even if the underlying mtime changes
+    mid-request.
+
+    The bug this guards against: if _debris_epoch() were called independently
+    inside each worker thread (rather than once in the handler and closed over),
+    a mid-sweep cache refresh would silently anchor different chart points to
+    different epochs, corrupting the comparison between them with no visible
+    symptom.
+
+    Test strategy: patch os.path.getmtime (the underlying call inside
+    _debris_epoch) to return a different value on every successive call.
+    Then run a sweep and confirm every launch_date in the window is anchored
+    to the SAME base date — the one computed on the first call at handler entry
+    — not a mix of dates reflecting multiple different mtime values.
+    """
+
+    def test_all_window_launch_dates_anchored_to_same_epoch(self, monkeypatch):
+        _sweep_narration_cache.clear()
+        monkeypatch.setattr("app.main._groq_client", lambda: _fake_groq_client())
+
+        # _debris_epoch() calls os.path.getmtime.  We make it return a
+        # different monotonically-increasing value on every call so that any
+        # independent per-thread invocation produces a visibly different result.
+        from datetime import datetime, timezone
+        import itertools
+
+        base_ts = datetime(2025, 7, 15, 0, 0, 0, tzinfo=timezone.utc).timestamp()
+        # Each successive call advances by 1 day worth of seconds.
+        call_counter = itertools.count()
+
+        def shifting_getmtime(path):
+            n = next(call_counter)
+            return base_ts + n * 86400.0  # day 0, day 1, day 2, …
+
+        # Patch at the source so even calls from worker threads hit it.
+        monkeypatch.setattr("app.main.os.path.getmtime", shifting_getmtime)
+        monkeypatch.setattr("app.main._run_plan", lambda req, **kw: _stub_run_plan_result())
+
+        req = _make_sweep_req(window_days=4)
+        result = sweep_launch_window(req)
+
+        # If epoch were re-called per worker, launch_dates would span multiple
+        # different base dates.  If frozen correctly, all dates share the SAME
+        # base (2025-07-15 + day_offset), so the earliest date in the window
+        # must equal the frozen epoch date, and all others are offsets from it.
+        valid_entries = [r for r in result["window"] if "error" not in r]
+        assert len(valid_entries) > 0, "No valid window entries to check"
+
+        # Extract the base date from the first entry (day_offset 0.0).
+        day0_entry = next((r for r in valid_entries if r["day_offset"] == 0.0), None)
+        assert day0_entry is not None, "No day_offset=0.0 entry in window"
+        base_date_str = day0_entry["launch_date"]  # e.g. "2025-07-15"
+
+        # Every other entry's launch_date must be anchored to the same base.
+        # If epoch were re-called per worker, some entries would be offset from
+        # day 1, day 2, etc., making their dates jump by more than their day_offset.
+        from datetime import date, timedelta
+        base_date = date.fromisoformat(base_date_str[:10])
+
+        for entry in valid_entries:
+            offset = entry["day_offset"]
+            expected_date = base_date + timedelta(days=offset)
+            actual_date_str = entry["launch_date"][:10]
+            actual_date = date.fromisoformat(actual_date_str)
+            assert actual_date == expected_date, (
+                f"day_offset={offset}: expected launch_date anchored to {expected_date}, "
+                f"got {actual_date}. Epoch was re-called per worker (frozen epoch broken)."
+            )
+
+    def test_debris_epoch_called_once_not_per_worker(self, monkeypatch):
+        """Count _debris_epoch() calls during a sweep: must be exactly 1."""
+        _sweep_narration_cache.clear()
+        monkeypatch.setattr("app.main._groq_client", lambda: _fake_groq_client())
+        monkeypatch.setattr("app.main._run_plan", lambda req, **kw: _stub_run_plan_result())
+
+        call_count = [0]
+        real_debris_epoch = main_module._debris_epoch
+
+        def counting_debris_epoch():
+            call_count[0] += 1
+            return real_debris_epoch()
+
+        monkeypatch.setattr("app.main._debris_epoch", counting_debris_epoch)
+
+        req = _make_sweep_req(window_days=4)
+        sweep_launch_window(req)
+
+        assert call_count[0] == 1, (
+            f"_debris_epoch() was called {call_count[0]} times during sweep "
+            f"(expected exactly 1 — once at handler entry, then frozen)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Q2: No double-drift
+# ---------------------------------------------------------------------------
+
+class TestNoDoubleDrift:
+    """The sweep applies RAAN drift exactly once via shifted_raan passed to the
+    depot node.  The internal PlanRequest built per-date must NOT carry
+    launch_date — doing so would trigger _run_plan's own guardrail logic and
+    apply the drift a second time, corrupting every result in the sweep.
+
+    Test strategy:
+      1. For a known day_offset, compute the expected single-drift RAAN and
+         the expected double-drift RAAN.
+      2. Capture the actual start_raan_deg that reaches optimize_route().
+      3. Assert it matches the single-drift value and does NOT match the
+         double-drift value.
+    """
+
+    def test_no_launch_date_on_internal_plan_request(self, monkeypatch):
+        """The PlanRequest constructed inside _solve_one_date must have
+        launch_date=None so _run_plan's guardrail branch is never entered."""
+        _sweep_narration_cache.clear()
+        monkeypatch.setattr("app.main._groq_client", lambda: _fake_groq_client())
+
+        captured_reqs = []
+
+        def capturing_run_plan(req, **kw):
+            captured_reqs.append(req)
+            return _stub_run_plan_result()
+
+        monkeypatch.setattr("app.main._run_plan", capturing_run_plan)
+
+        req = _make_sweep_req(window_days=2)
+        sweep_launch_window(req)
+
+        assert len(captured_reqs) > 0, "No _run_plan calls captured"
+        for captured in captured_reqs:
+            assert captured.launch_date is None, (
+                f"Internal PlanRequest has launch_date={captured.launch_date!r} — "
+                "this would double-apply RAAN drift: once via shifted_raan, "
+                "once via _run_plan's launch_date guardrail."
+            )
+
+    def test_raan_at_depot_matches_single_drift_not_double(self, monkeypatch):
+        """The RAAN that actually reaches the depot node must equal
+        start_raan_deg + single_drift(day_offset), not
+        start_raan_deg + double_drift(2 * day_offset)."""
+        _sweep_narration_cache.clear()
+        monkeypatch.setattr("app.main._groq_client", lambda: _fake_groq_client())
+
+        from app.delta_v import raan_drift_deg
+
+        start_raan = 45.0
+        alt = 800.0
+        incl = 74.0
+        # Use window_days=1 so we have a day_offset=1.0 point to check.
+        day_offset_to_check = 1.0
+        single_drift = raan_drift_deg(alt, incl, day_offset_to_check)
+        expected_raan = start_raan + single_drift
+
+        # Double-drift would be start_raan + raan_drift(2 * day_offset)
+        # (since _run_plan would compute drift again from the same anchor).
+        # We verify the actual RAAN is NOT near this value.
+        double_drift = raan_drift_deg(alt, incl, 2 * day_offset_to_check)
+        double_drift_raan = start_raan + double_drift
+
+        captured_raans = {}
+
+        def capturing_run_plan(req, **kw):
+            captured_raans[req.start_raan_deg] = req.start_raan_deg
+            return _stub_run_plan_result()
+
+        monkeypatch.setattr("app.main._run_plan", capturing_run_plan)
+
+        req = SweepLaunchWindowRequest(
+            start_altitude_km=alt,
+            start_inclination_deg=incl,
+            start_raan_deg=start_raan,
+            fuel_budget_km_s=2.5,
+            window_days=1,
+        )
+        sweep_launch_window(req)
+
+        # Find the RAAN used for day_offset=1.0.
+        assert len(captured_raans) > 0
+        # There should be a call with raan near expected_raan.
+        actual_raans = list(captured_raans.keys())
+        closest = min(actual_raans, key=lambda r: abs(r - expected_raan))
+
+        assert abs(closest - expected_raan) < 0.001, (
+            f"RAAN at depot for day_offset=1.0 was {closest:.6f}, "
+            f"expected single-drift value {expected_raan:.6f}. "
+            f"Double-drift would give {double_drift_raan:.6f}."
+        )
+        # Also assert it is NOT the double-drift value (catches the specific bug).
+        assert abs(closest - double_drift_raan) > 0.001, (
+            f"RAAN matches double-drift value {double_drift_raan:.6f} — "
+            "drift is being applied twice!"
+        )
