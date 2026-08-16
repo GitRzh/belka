@@ -8,19 +8,16 @@
 //   - "RECOMMENDED" badge on the preset with the highest risk/fuel efficiency
 //
 // Color rule: grayscale, brightness-only — matching DataQualityBadge.jsx.
-//   Fuel-Conservative = dim/dark gray (#4a4a4e)
-//   Balanced          = mid gray      (#8a8a8e)
-//   Risk-Aggressive   = bright/white  (#f2f2f0)
+//   Brightness is rank-based (best efficiency = brightest), not fixed to label.
+//   rank 0 (best)   → #f2f2f0 (brightest)
+//   rank 1 (middle) → #8a8a8e (mid)
+//   rank 2 (worst)  → #4a4a4e (dimmest)
 // No hues introduced.
 
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts'
 
-// Per-preset grayscale brightness values, consistent across card + chart bars.
-const PRESET_STYLE = {
-  'Fuel-Conservative': { color: '#4a4a4e', label: 'Fuel-Conservative' },
-  'Balanced':          { color: '#8a8a8e', label: 'Balanced' },
-  'Risk-Aggressive':   { color: '#f2f2f0', label: 'Risk-Aggressive' },
-}
+// Rank-based brightness palette (index = rank, 0 = best).
+const RANK_COLORS = ['#f2f2f0', '#8a8a8e', '#4a4a4e']
 
 // Returns the preset with the highest risk/fuel efficiency
 // (total_risk_collected / total_fuel_cost_km_s), or null if:
@@ -44,12 +41,28 @@ export function findRecommendedPreset(presets) {
   return winners[0].preset
 }
 
-// Chart data transformer: one row per preset, two metrics per row.
-function buildChartData(presets) {
+// Ranks all presets by descending efficiency (risk/fuel).
+// Presets with total_fuel_cost_km_s <= 0 sort to the bottom (-Infinity).
+// Always returns all presets; ties preserve original array order (stable sort).
+// Exported for direct unit testing.
+export function rankPresetsByEfficiency(presets) {
+  const withEff = presets.map(p => ({
+    preset: p,
+    efficiency: p.total_fuel_cost_km_s > 0
+      ? p.total_risk_collected / p.total_fuel_cost_km_s
+      : -Infinity,
+  }))
+  withEff.sort((a, b) => b.efficiency - a.efficiency)
+  return withEff.map(e => e.preset)
+}
+
+// Chart data transformer: one row per preset, two metrics per row + rank color.
+function buildChartData(presets, rankColorByLabel) {
   return presets.map((p) => ({
-    name:            p.label,
-    'Fuel (km/s)':   p.total_fuel_cost_km_s,
+    name:             p.label,
+    'Fuel (km/s)':    p.total_fuel_cost_km_s,
     'Risk collected': p.total_risk_collected,
+    color:            rankColorByLabel[p.label] ?? 'var(--c-steel)',
   }))
 }
 
@@ -78,8 +91,15 @@ export default function ComparisonPanel({ result, onUsePlan, onClose }) {
   if (!result) return null
 
   const { presets, comparison_narration } = result
-  const chartData = buildChartData(presets)
   const recommendedPreset = findRecommendedPreset(presets)
+
+  // Build rank-color lookup: { [presetLabel]: colorHex }
+  const ranked = rankPresetsByEfficiency(presets)
+  const rankColorByLabel = Object.fromEntries(
+    ranked.map((p, i) => [p.label, RANK_COLORS[i] ?? 'var(--c-steel)'])
+  )
+
+  const chartData = buildChartData(presets, rankColorByLabel)
 
   return (
     <div className="reasoning" style={{ paddingBottom: 16 }}>
@@ -99,13 +119,13 @@ export default function ComparisonPanel({ result, onUsePlan, onClose }) {
       {/* ── Stat cards ──────────────────────────────────────────── */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         {presets.map((preset) => {
-          const style = PRESET_STYLE[preset.label] ?? { color: 'var(--c-steel)' }
+          const color = rankColorByLabel[preset.label] ?? 'var(--c-steel)'
           return (
             <div
               key={preset.label}
               style={{
                 flex: 1,
-                border: `1px solid ${style.color}`,
+                border: `1px solid ${color}`,
                 borderRadius: 'var(--radius)',
                 padding: '10px 10px 8px',
                 background: 'var(--c-panel)',
@@ -142,7 +162,7 @@ export default function ComparisonPanel({ result, onUsePlan, onClose }) {
                 fontSize: 11,
                 textTransform: 'uppercase',
                 letterSpacing: '0.06em',
-                color: style.color,
+                color: color,
                 marginBottom: 4,
               }}>
                 {preset.label}
@@ -170,8 +190,8 @@ export default function ComparisonPanel({ result, onUsePlan, onClose }) {
                   fontSize: 11,
                   padding: '4px 8px',
                   width: '100%',
-                  borderColor: style.color,
-                  color: style.color,
+                  borderColor: color,
+                  color: color,
                 }}
                 onClick={() => onUsePlan?.(preset)}
               >
@@ -214,10 +234,18 @@ export default function ComparisonPanel({ result, onUsePlan, onClose }) {
             <Legend
               wrapperStyle={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--c-steel)' }}
             />
-            {/* Fuel bar: dark gray fill for each preset's bar,
-                but we use two separate bars per metric so both are monochrome. */}
-            <Bar dataKey="Fuel (km/s)"    fill="#4a4a4e" radius={[1, 1, 0, 0]} />
-            <Bar dataKey="Risk collected" fill="#8a8a8e" radius={[1, 1, 0, 0]} />
+            {/* Per-preset rank color: Fuel bar solid, Risk bar at 0.55 opacity.
+                Bar-level fill provides the Legend swatch; Cell overrides per-point color. */}
+            <Bar dataKey="Fuel (km/s)" fill={RANK_COLORS[0]} radius={[1, 1, 0, 0]}>
+              {chartData.map((entry) => (
+                <Cell key={entry.name} fill={entry.color} fillOpacity={1} />
+              ))}
+            </Bar>
+            <Bar dataKey="Risk collected" fill={RANK_COLORS[0]} radius={[1, 1, 0, 0]}>
+              {chartData.map((entry) => (
+                <Cell key={entry.name} fill={entry.color} fillOpacity={0.55} />
+              ))}
+            </Bar>
           </BarChart>
         </ResponsiveContainer>
       </div>

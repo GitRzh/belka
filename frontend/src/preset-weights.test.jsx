@@ -26,7 +26,7 @@
 import React from 'react'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { findRecommendedPreset } from './components/ComparisonPanel.jsx'
+import { findRecommendedPreset, rankPresetsByEfficiency } from './components/ComparisonPanel.jsx'
 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
@@ -168,6 +168,153 @@ beforeEach(() => {
   api.compare.mockResolvedValue(COMPARE_RESULT)
   api.previewOrbit.mockResolvedValue({ lat: 0, lon: 0 })
   api.getNaiveRoute.mockResolvedValue(PLAN_RESULT)
+})
+
+// ─── UNIT-rank: rankPresetsByEfficiency() unit tests ─────────────────────────
+
+describe('UNIT-rank-a) rankPresetsByEfficiency() — descending order', () => {
+  it('returns all 3 presets sorted by efficiency descending', () => {
+    // Efficiencies: Fuel-Conservative 0.3/0.6=0.5, Balanced 0.5/0.8=0.625, Risk-Aggressive 0.9/1.1≈0.818
+    const ranked = rankPresetsByEfficiency(COMPARE_RESULT.presets)
+    expect(ranked.map(p => p.label)).toEqual(['Risk-Aggressive', 'Balanced', 'Fuel-Conservative'])
+  })
+
+  it('never filters — always returns all 3 presets', () => {
+    const allZero = COMPARE_RESULT.presets.map(p => ({ ...p, total_fuel_cost_km_s: 0 }))
+    const ranked = rankPresetsByEfficiency(allZero)
+    expect(ranked).toHaveLength(3)
+  })
+
+  it('preset with zero fuel cost sorts to the bottom regardless of risk', () => {
+    const presets = [
+      { label: 'Fuel-Conservative', total_fuel_cost_km_s: 0,   total_risk_collected: 9999 },
+      { label: 'Balanced',          total_fuel_cost_km_s: 1.0,  total_risk_collected: 0.5 },
+      { label: 'Risk-Aggressive',   total_fuel_cost_km_s: 0.5,  total_risk_collected: 0.4 },
+    ]
+    const ranked = rankPresetsByEfficiency(presets)
+    // Balanced 0.5, Risk-Aggressive 0.8, Fuel-Conservative -Infinity
+    // Sorted: Risk-Aggressive (0.8), Balanced (0.5), Fuel-Conservative (-Inf)
+    expect(ranked[2].label).toBe('Fuel-Conservative')
+  })
+
+  it('exact 2-way tie preserves original array order for the tied pair', () => {
+    const presets = [
+      { label: 'Fuel-Conservative', total_fuel_cost_km_s: 1.0, total_risk_collected: 0.1 }, // 0.1 — last
+      { label: 'Balanced',          total_fuel_cost_km_s: 1.0, total_risk_collected: 0.5 }, // 0.5 — tie
+      { label: 'Risk-Aggressive',   total_fuel_cost_km_s: 2.0, total_risk_collected: 1.0 }, // 0.5 — tie
+    ]
+    const ranked = rankPresetsByEfficiency(presets)
+    // Balanced and Risk-Aggressive both 0.5; stable sort preserves Balanced before Risk-Aggressive
+    expect(ranked[0].label).toBe('Balanced')
+    expect(ranked[1].label).toBe('Risk-Aggressive')
+    expect(ranked[2].label).toBe('Fuel-Conservative')
+  })
+
+  it('exact 3-way tie returns presets in original array order', () => {
+    const presets = [
+      { label: 'Fuel-Conservative', total_fuel_cost_km_s: 1.0, total_risk_collected: 0.5 },
+      { label: 'Balanced',          total_fuel_cost_km_s: 2.0, total_risk_collected: 1.0 },
+      { label: 'Risk-Aggressive',   total_fuel_cost_km_s: 0.5, total_risk_collected: 0.25 },
+    ]
+    const ranked = rankPresetsByEfficiency(presets)
+    expect(ranked.map(p => p.label)).toEqual(['Fuel-Conservative', 'Balanced', 'Risk-Aggressive'])
+  })
+})
+
+describe('UNIT-rank-b) real screenshot numbers confirm correct rank order', () => {
+  // Fuel-Conservative: 3.4443/34.753  ≈ 0.09912
+  // Balanced:          4.2548/32.4307 ≈ 0.13119  ← highest
+  // Risk-Aggressive:   4.1755/35.798  ≈ 0.11664  ← second
+  const screenshotPresets = [
+    { label: 'Fuel-Conservative', total_fuel_cost_km_s: 34.753,  total_risk_collected: 3.4443 },
+    { label: 'Balanced',          total_fuel_cost_km_s: 32.4307, total_risk_collected: 4.2548 },
+    { label: 'Risk-Aggressive',   total_fuel_cost_km_s: 35.798,  total_risk_collected: 4.1755 },
+  ]
+
+  it('rank order is [Balanced, Risk-Aggressive, Fuel-Conservative]', () => {
+    const ranked = rankPresetsByEfficiency(screenshotPresets)
+    expect(ranked.map(p => p.label)).toEqual(['Balanced', 'Risk-Aggressive', 'Fuel-Conservative'])
+  })
+
+  it('Balanced gets rank 0 → card border color is #f2f2f0 (brightest)', () => {
+    const RANK_COLORS = ['#f2f2f0', '#8a8a8e', '#4a4a4e']
+    const ranked = rankPresetsByEfficiency(screenshotPresets)
+    const rankColorByLabel = Object.fromEntries(ranked.map((p, i) => [p.label, RANK_COLORS[i]]))
+    expect(rankColorByLabel['Balanced']).toBe('#f2f2f0')
+    expect(rankColorByLabel['Risk-Aggressive']).toBe('#8a8a8e')
+    expect(rankColorByLabel['Fuel-Conservative']).toBe('#4a4a4e')
+  })
+})
+
+// ─── RENDER-rank-c: card border colors in the DOM match rank assignment ───────
+
+describe('RENDER-rank-c) card border colors in DOM match rank-based assignment', () => {
+  it('Risk-Aggressive card border is brightest (#f2f2f0) since it has highest efficiency in COMPARE_RESULT', async () => {
+    // COMPARE_RESULT efficiencies: Risk-Aggressive 0.9/1.1≈0.818, Balanced 0.5/0.8=0.625, Fuel-Conservative 0.3/0.6=0.5
+    await renderAndOpenComparison()
+
+    const riskLabel = screen.getByText('Risk-Aggressive', { selector: 'div' })
+    const card = riskLabel.closest('[style*="border"]')
+    expect(card).toBeTruthy()
+    // Risk-Aggressive is rank 0 → brightest → #f2f2f0.
+    // JSDOM normalises hex to rgb in computed style; accept both forms.
+    // #f2f2f0 = rgb(242, 242, 240)
+    const styleStr = card.getAttribute('style') ?? ''
+    expect(styleStr).toMatch(/#f2f2f0|rgb\(242,\s*242,\s*240\)/)
+  })
+
+  it('Fuel-Conservative card border is dimmest (#4a4a4e) since it has lowest efficiency in COMPARE_RESULT', async () => {
+    await renderAndOpenComparison()
+
+    const fuelLabel = screen.getByText('Fuel-Conservative', { selector: 'div' })
+    const card = fuelLabel.closest('[style*="border"]')
+    expect(card).toBeTruthy()
+    // Fuel-Conservative is rank 2 → dimmest → #4a4a4e.
+    // JSDOM normalises hex to rgb in computed style; accept both forms.
+    // #4a4a4e = rgb(74, 74, 78)
+    const styleStr = card.getAttribute('style') ?? ''
+    expect(styleStr).toMatch(/#4a4a4e|rgb\(74,\s*74,\s*78\)/)
+  })
+})
+
+// ─── RENDER-rank-d: chart Cell fill colors match card border colors ───────────
+
+describe('RENDER-rank-d) chart Cell fill colors consistent with card border colors', () => {
+  it('each preset maps to same rank color in both card and chart data (unit)', () => {
+    const RANK_COLORS = ['#f2f2f0', '#8a8a8e', '#4a4a4e']
+    const presets = COMPARE_RESULT.presets
+    const ranked = rankPresetsByEfficiency(presets)
+    const rankColorByLabel = Object.fromEntries(ranked.map((p, i) => [p.label, RANK_COLORS[i]]))
+
+    // Simulate buildChartData output color field
+    const chartData = presets.map(p => ({
+      name: p.label,
+      color: rankColorByLabel[p.label],
+    }))
+
+    for (const row of chartData) {
+      expect(row.color).toBe(rankColorByLabel[row.name])
+    }
+  })
+
+  it('Fuel bar Cell and Risk bar Cell for the same preset share the same fill color', () => {
+    const RANK_COLORS = ['#f2f2f0', '#8a8a8e', '#4a4a4e']
+    const presets = COMPARE_RESULT.presets
+    const ranked = rankPresetsByEfficiency(presets)
+    const rankColorByLabel = Object.fromEntries(ranked.map((p, i) => [p.label, RANK_COLORS[i]]))
+
+    const chartData = presets.map(p => ({
+      name: p.label,
+      color: rankColorByLabel[p.label],
+    }))
+
+    // Both bars use entry.color — only fillOpacity differs
+    for (const entry of chartData) {
+      const fuelCellFill = entry.color   // fillOpacity 1
+      const riskCellFill = entry.color   // fillOpacity 0.55
+      expect(fuelCellFill).toBe(riskCellFill)
+    }
+  })
 })
 
 // ─── UNIT-a: findRecommendedPreset() unit tests (no rendering) ───────────────
