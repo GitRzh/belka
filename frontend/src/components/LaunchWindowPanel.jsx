@@ -33,6 +33,20 @@ export function filterParetoOptimal(window) {
 }
 
 // Exported for unit testing.
+// Returns true if every valid entry in the window has the same total_risk_collected.
+// "Valid" means no error key and total_risk_collected is not null.
+// Used purely for display: when true, the pareto_frontier scatter needs an
+// explanatory note that the flat risk axis isn't a rendering bug.
+// Does NOT affect sweep_mode, compute_pareto_frontier, or is_pareto_optimal.
+export function hasConstantRisk(window) {
+  const risks = window
+    .filter(r => !r.error && r.total_risk_collected != null)
+    .map(r => r.total_risk_collected)
+  if (risks.length === 0) return false
+  return risks.every(v => v === risks[0])
+}
+
+// Exported for unit testing.
 // Returns the entry with lowest total_fuel_cost_km_s (tie → lower day_offset).
 export function findLowestFuelEntry(window) {
   const valid = window.filter(r => r.total_fuel_cost_km_s != null)
@@ -88,6 +102,7 @@ function GrayTooltip({ active, payload }) {
 // Scatter chart for pareto_frontier mode.
 function ParetoScatter({ window, lowestFuelDate, onSelectDate }) {
   const validPoints = window.filter(r => r.total_fuel_cost_km_s != null && r.total_risk_collected != null)
+  const flatRisk = hasConstantRisk(window)
 
   return (
     <div>
@@ -107,6 +122,24 @@ function ParetoScatter({ window, lowestFuelDate, onSelectDate }) {
         <span style={{ color: COLOR_DOMINATED }}>●</span> Dominated&nbsp;&nbsp;
         Click any point to set launch date
       </div>
+      {flatRisk && (
+        <div
+          data-testid="flat-risk-note"
+          style={{
+            fontSize: 11,
+            color: 'var(--c-steel)',
+            background: 'var(--c-panel)',
+            border: '1px solid var(--c-line)',
+            borderRadius: 'var(--radius)',
+            padding: '6px 10px',
+            marginBottom: 8,
+            fontFamily: 'var(--font-mono)',
+          }}
+        >
+          Risk collected didn't vary across these dates — the same debris set was reachable
+          regardless of launch date, so fuel cost alone determines the best choice here.
+        </div>
+      )}
       <ResponsiveContainer width="100%" height={200}>
         <ScatterChart margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--c-line)" />
