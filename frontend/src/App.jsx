@@ -8,6 +8,7 @@ import ReasoningPanel from './components/ReasoningPanel.jsx'
 import ReplanInput from './components/ReplanInput.jsx'
 import CustomSelectionSummary from './components/CustomSelectionSummary.jsx'
 import ComparisonPanel from './components/ComparisonPanel.jsx'
+import LaunchWindowPanel from './components/LaunchWindowPanel.jsx'
 import { api } from './api.js'
 
 const REMOVAL_METHODS = [
@@ -382,6 +383,13 @@ export default function App() {
   // identity — guaranteeing PlanForm's useEffect re-fires on every click.
   const [presetWeightsToApply, setPresetWeightsToApply] = useState(null)
   const presetWeightsSeqRef = useRef(0)
+
+  // Launch-window sweep state
+  const [sweeping, setSweeping] = useState(false)
+  const [sweepResult, setSweepResult] = useState(null)
+  // Wrapped as { date, seq } so clicking the same date twice still fires the effect.
+  const [sweepLaunchDateToApply, setSweepLaunchDateToApply] = useState(null)
+  const sweepLaunchDateSeqRef = useRef(0)
   const [formError, setFormError] = useState(null)
 
   // Visualization arrow panel open/closed state
@@ -410,6 +418,7 @@ export default function App() {
     setNaivePlan(null)
     setRouteMode('ai')
     setComparisonResult(null)
+    setSweepResult(null)
   }
 
   const MAX_HISTORY = 20
@@ -468,6 +477,27 @@ export default function App() {
     // or when the user clicks the explicit Close button.
     presetWeightsSeqRef.current += 1
     setPresetWeightsToApply({ weights: preset.weights, seq: presetWeightsSeqRef.current })
+  }
+
+  async function handleSweep(payload) {
+    setSweeping(true)
+    setFormError(null)
+    setSweepResult(null)
+    try {
+      const result = await api.sweepLaunchWindow(payload)
+      setSweepResult(result)
+    } catch (err) {
+      setFormError(err.body?.detail || err.message)
+    } finally {
+      setSweeping(false)
+    }
+  }
+
+  function handleSelectSweepDate(dateStr) {
+    // Clicking a scatter/bar point populates PlanForm's launch_date field ONLY.
+    // No auto-submit, no History entry, no navigation — mirrors "Use these weights".
+    sweepLaunchDateSeqRef.current += 1
+    setSweepLaunchDateToApply({ date: dateStr, seq: sweepLaunchDateSeqRef.current })
   }
 
   // Helper: append a new replan tab (drops oldest replan if over cap; Plan always stays).
@@ -1194,11 +1224,14 @@ export default function App() {
                 <PlanForm
                   onSubmit={handleGeneratePlan}
                   onCompare={handleCompare}
+                  onSweep={handleSweep}
                   onChange={handleFormChange}
                   submitting={planning}
                   comparing={comparing}
+                  sweeping={sweeping}
                   globeRef={globeRef}
                   presetWeights={presetWeightsToApply}
+                  sweepLaunchDate={sweepLaunchDateToApply}
                 />
 
                 {/* ComparisonPanel — takes over the right column when a compare result is ready.
@@ -1216,6 +1249,24 @@ export default function App() {
                       result={comparisonResult}
                       onUsePlan={(preset) => handleUsePlan(preset)}
                       onClose={() => setComparisonResult(null)}
+                    />
+                  </div>
+                )}
+
+                {/* LaunchWindowPanel — shown while sweeping or when result is ready. */}
+                {sweeping && !sweepResult && (
+                  <div style={{ marginTop: 12, padding: '10px', border: '1px solid var(--c-line)', borderRadius: 'var(--radius)' }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--c-steel)' }}>
+                      Sweeping launch dates…
+                    </span>
+                  </div>
+                )}
+                {sweepResult && (
+                  <div style={{ marginTop: 12 }}>
+                    <LaunchWindowPanel
+                      result={sweepResult}
+                      onSelectDate={handleSelectSweepDate}
+                      onClose={() => setSweepResult(null)}
                     />
                   </div>
                 )}

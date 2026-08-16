@@ -83,6 +83,12 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  sweepLaunchWindow: (payload) =>
+    request('/sweep-launch-window', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   missionCost: (payload) =>
     request('/mission-cost', {
       method: 'POST',

@@ -6,7 +6,7 @@ import { api } from '../api'
 
 const REMOVAL_METHOD_FILTER_OPTIONS = ['', 'robotic_arm_or_net_capture', 'net_capture']
 
-export default function PlanForm({ onSubmit, onCompare, onChange, submitting, comparing, globeRef, presetWeights }) {
+export default function PlanForm({ onSubmit, onCompare, onSweep, onChange, submitting, comparing, sweeping, globeRef, presetWeights, sweepLaunchDate }) {
   // 'site' | 'raw' — which start-position mode is active
   const [startMode, setStartMode] = useState('site')
 
@@ -26,6 +26,8 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
     start_inclination_deg: '',
     fuel_budget_km_s: '2.5',  // C1: sensible default so the demo shows visible budget differences
   })
+
+  const [launchDate, setLaunchDate] = useState('')
 
   const [advanced, setAdvanced] = useState({
     pool_size: '',
@@ -88,6 +90,16 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
     }
   }, [presetWeights])
 
+  // When a sweep point is clicked, populate the launch_date field.
+  // sweepLaunchDate is shaped { date, seq } so clicking the same date twice
+  // still produces a new object reference and re-fires this effect.
+  // Only the launch_date field changes — no auto-submit, no navigation.
+  useEffect(() => {
+    if (sweepLaunchDate != null) {
+      setLaunchDate(sweepLaunchDate.date)
+    }
+  }, [sweepLaunchDate])
+
   useEffect(() => {
     api.getLaunchSites()
       .then((data) => {
@@ -116,6 +128,19 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
     setAdvanced((prev) => ({ ...prev, [field]: value }))
   }
 
+  // Build the start-position fragment of any payload (compare, sweep, submit).
+  function _buildStartPosition() {
+    if (startMode === 'site') {
+      const sp = { launch_site: siteForm.launch_site }
+      if (siteForm.inclination_deg !== '') sp.inclination_deg = Number(siteForm.inclination_deg)
+      return sp
+    }
+    return {
+      start_altitude_km:     Number(required.start_altitude_km),
+      start_inclination_deg: Number(required.start_inclination_deg),
+    }
+  }
+
   function handleCompare(e) {
     e.preventDefault()
     // Build the same payload as handleSubmit but dispatch to onCompare.
@@ -124,14 +149,7 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
       alert('Fuel budget must be a positive number (e.g. 2.5 km/s)')
       return
     }
-    const payload = { fuel_budget_km_s: budgetNum }
-    if (startMode === 'site') {
-      payload.launch_site = siteForm.launch_site
-      if (siteForm.inclination_deg !== '') payload.inclination_deg = Number(siteForm.inclination_deg)
-    } else {
-      payload.start_altitude_km     = Number(required.start_altitude_km)
-      payload.start_inclination_deg = Number(required.start_inclination_deg)
-    }
+    const payload = { fuel_budget_km_s: budgetNum, ..._buildStartPosition() }
     if (advanced.pool_size)             payload.pool_size             = Number(advanced.pool_size)
     if (advanced.nets_carried)          payload.nets_carried          = Number(advanced.nets_carried)
     if (advanced.max_wait_days)         payload.max_wait_days         = Number(advanced.max_wait_days)
@@ -139,6 +157,25 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
     if (advanced.start_raan_deg !== '') payload.start_raan_deg        = Number(advanced.start_raan_deg)
     // weights intentionally omitted — /compare always uses its own 3 fixed presets.
     onCompare?.(payload)
+  }
+
+  function handleSweep(e) {
+    e.preventDefault()
+    const budgetNum = Number(required.fuel_budget_km_s)
+    if (!required.fuel_budget_km_s || !Number.isFinite(budgetNum) || budgetNum <= 0) {
+      alert('Fuel budget must be a positive number (e.g. 2.5 km/s)')
+      return
+    }
+    const payload = { fuel_budget_km_s: budgetNum, ..._buildStartPosition() }
+    if (advanced.pool_size)             payload.pool_size             = Number(advanced.pool_size)
+    if (advanced.nets_carried)          payload.nets_carried          = Number(advanced.nets_carried)
+    if (advanced.max_wait_days)         payload.max_wait_days         = Number(advanced.max_wait_days)
+    if (advanced.removal_method_filter) payload.removal_method_filter = advanced.removal_method_filter
+    if (advanced.start_raan_deg !== '') payload.start_raan_deg        = Number(advanced.start_raan_deg)
+    if (advanced.weights_json) {
+      try { payload.weights = JSON.parse(advanced.weights_json) } catch { /* ignore */ }
+    }
+    onSweep?.(payload)
   }
 
   function handleSubmit(e) {
@@ -184,6 +221,9 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
         return
       }
     }
+
+    // launch_date: pass through only if non-empty (guards Guardrail 1 on backend).
+    if (launchDate.trim()) payload.launch_date = launchDate.trim()
 
     onSubmit(payload)
   }
@@ -255,6 +295,18 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
                     <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
                   </svg>
                 </button>
+                <button
+                  type="button"
+                  className="pin-btn"
+                  title="Explore launch windows"
+                  disabled={sitesLoading || !siteForm.launch_site || submitting || comparing || sweeping}
+                  onClick={handleSweep}
+                  style={{ marginLeft: 2 }}
+                >
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                    <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                  </svg>
+                </button>
               </div>
             </div>
 
@@ -310,8 +362,8 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
               />
             </label>
 
-            {/* Pin orbit button — spans full width */}
-            <div className="form-grid-span" style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            {/* Pin orbit + Explore Launch Windows — spans full width */}
+            <div className="form-grid-span" style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
               <button
                 type="button"
                 className="pin-btn pin-btn--orbit"
@@ -324,6 +376,20 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
                 </svg>
                 <span style={{ marginLeft: 4, fontSize: 10, fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                   Pin orbit
+                </span>
+              </button>
+              <button
+                type="button"
+                className="pin-btn pin-btn--orbit"
+                title="Explore launch windows"
+                disabled={!required.start_altitude_km || !required.start_inclination_deg || submitting || comparing || sweeping}
+                onClick={handleSweep}
+              >
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                  <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                </svg>
+                <span style={{ marginLeft: 4, fontSize: 10, fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  {sweeping ? 'Sweeping…' : 'Explore windows'}
                 </span>
               </button>
             </div>
@@ -424,16 +490,27 @@ export default function PlanForm({ onSubmit, onCompare, onChange, submitting, co
           />
         </label>
 
+        {/* Launch date — populated by clicking a sweep point; editable manually too */}
+        <label className="field form-grid-span">
+          Launch date
+          <input
+            type="text"
+            value={launchDate}
+            placeholder="e.g. 2025-07-18 (set by clicking a sweep point)"
+            onChange={(e) => setLaunchDate(e.target.value)}
+          />
+        </label>
+
       </div>{/* end .form-grid */}
 
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-        <button type="submit" className="btn btn-primary" disabled={submitting || comparing} style={{ flex: 1 }}>
+        <button type="submit" className="btn btn-primary" disabled={submitting || comparing || sweeping} style={{ flex: 1 }}>
           {submitting ? 'Generating plan…' : 'Generate plan'}
         </button>
         <button
           type="button"
           className="btn"
-          disabled={submitting || comparing}
+          disabled={submitting || comparing || sweeping}
           style={{ flex: 1 }}
           onClick={handleCompare}
         >

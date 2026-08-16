@@ -23,7 +23,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import groq as groq_module
@@ -33,11 +33,11 @@ from pydantic import BaseModel, Field, model_validator
 
 load_dotenv()
 
-from app.tle_fetch import get_debris_field, get_cache_timestamp, CACHE_MAX_AGE_SECONDS
+from app.tle_fetch import get_debris_field, get_cache_timestamp, CACHE_MAX_AGE_SECONDS, CACHE_FILE as _TLE_CACHE_FILE
 from app.launch_sites import LAUNCH_SITES, derive_start_orbit
 from app.risk_score import score_debris_field, DEFAULT_WEIGHTS
 from app.cost_matrix import select_candidate_pool, DEFAULT_POOL_SIZE, DELTA_V_SCALE
-from app.optimizer import optimize_route, solve_forced_route, TRANSFER_TIME_DAYS_PER_KM_S, DRY_RUN_TIME_LIMIT_SECONDS
+from app.optimizer import optimize_route, solve_forced_route, compute_pareto_frontier, TRANSFER_TIME_DAYS_PER_KM_S, DRY_RUN_TIME_LIMIT_SECONDS
 from app.removal_method import add_removal_methods, METHOD_ROBOTIC_ARM_OR_NET, METHOD_NET_CAPTURE, METHOD_MONITOR_ONLY
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -83,6 +83,29 @@ _reasoning_cache: dict[int, dict] = {}
 # /replan with non-default weights) bypass this cache because their output
 # depends on the caller-supplied weights dict and must not cross-contaminate.
 _scored_field_cache: dict[str, list] = {}  # {"<mtime>": [enriched_objects]}
+
+# Maximum day_offset allowed for launch_date on PlanRequest and the sweep window.
+# Must match _TLE_AGING_DAYS so both paths use the same reliability cap.
+_MAX_LAUNCH_DAY_OFFSET = 14.0
+
+
+def _debris_epoch() -> datetime:
+    """Single source of truth for the TLE reference epoch used by both the
+    sweep's launch_date construction and _run_plan's drift computation.
+
+    Returns the UTC datetime of the last TLE cache write (the mtime of
+    CACHE_FILE).  Both callers anchor their day_offset arithmetic to this
+    fixed point rather than wall-clock 'now', eliminating any midnight-
+    boundary drift between a sweep and the /plan call that follows it.
+
+    MUST be called only AFTER _get_scored_field() has been invoked in the
+    same request, which guarantees CACHE_FILE exists (get_debris_field()
+    writes it on first fetch).  Both sweep_launch_window and _run_plan
+    call _get_scored_field() unconditionally at their top before touching
+    this function — that ordering is structural, not incidental."""
+    mtime = os.path.getmtime(_TLE_CACHE_FILE)
+    return datetime.fromtimestamp(mtime, tz=timezone.utc)
+
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +319,17 @@ class PlanRequest(BaseModel):
     removal_method_filter: Optional[str] = Field(None, description=f"Restrict the route to a single removal method -- one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)}. No real ADR mission has flown mixed capture hardware (RemoveDEBRIS = net+harpoon only, ELSA-M = magnetic docking only), so this models 'one spacecraft, one hardware type'. Unset preserves the current mixed-method behavior.")
     target_norad_id: Optional[int] = Field(None, description="Force this object to be considered by the optimizer even if it wouldn't normally rank into the top pool_size by risk. The optimizer still decides whether to actually visit it (AddDisjunction still applies) -- this only guarantees consideration, not a visit. Rejected if the object is classified monitor_only (never a real target).")
     max_tle_age_days: float = Field(14.0, description="Exclude objects whose TLE epoch is older than this many days from route planning. Default 14.0 matches published TLE-accuracy research (~2 week reliable window). Raise to include older/less-trusted debris, lower to be stricter. Does not affect /debris-field or /debris/{norad_id}, which always show the full field with data_quality labels.")
+    launch_date: Optional[str] = Field(
+        None,
+        description=(
+            "ISO-8601 UTC date (YYYY-MM-DD) or datetime (YYYY-MM-DDTHH:MM:SSZ) of the planned "
+            "mission start. When present, _run_plan applies raan_drift_deg() to start_raan_deg "
+            "so the depot node reflects the mission's actual orbital plane at launch. "
+            "day_offset is computed as (launch_date - TLE epoch) and is capped at "
+            "14 days (the TLE reliability window). Absent = day_offset 0, zero behaviour change "
+            "for any existing caller. Populated by clicking a point in the Launch Window Explorer."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -595,10 +629,57 @@ def _run_plan(req: PlanRequest, *, time_limit_seconds: Optional[int] = None) -> 
 
     time_limit_seconds: when set, overrides SOLVER_TIME_LIMIT_SECONDS for the
     optimize_route() call.  Used by _dry_run_plan() to pass DRY_RUN_TIME_LIMIT_SECONDS
-    so feasibility checks complete in ~1s instead of the full 5s budget."""
+    so feasibility checks complete in ~1s instead of the full 5s budget.
+
+    launch_date (on req): when present, computes day_offset = (launch_date - TLE epoch)
+    and applies raan_drift_deg() to start_raan_deg so the depot reflects the actual
+    orbital plane at launch.  Absent → day_offset 0, zero behaviour change.
+    day_offset is capped at _MAX_LAUNCH_DAY_OFFSET (14 days) to prevent bypassing the
+    TLE reliability window by setting a far-future launch_date directly on PlanRequest.
+    """
+    # STRUCTURAL ordering: _get_scored_field MUST come before _debris_epoch() so the
+    # TLE cache file exists when _debris_epoch() reads its mtime.
     scored = _get_scored_field(weights=req.weights)
     if not scored:
         raise HTTPException(status_code=502, detail="Debris field empty -- Celestrak fetch may have failed")
+
+    # --- launch_date → RAAN drift (Guardrails 1, 2, 3) ---
+    # Guardrail 1: absent launch_date → day_offset 0, start_raan_deg unchanged.
+    # Guardrail 2: epoch anchor is _debris_epoch() (TLE cache mtime), not wall-clock
+    #              'now' — same anchor the sweep used, so clicking a point and then
+    #              generating a plan always solves the same day_offset.
+    # Guardrail 3: cap day_offset at _MAX_LAUNCH_DAY_OFFSET; reject values beyond it.
+    effective_raan_deg = req.start_raan_deg
+    if req.launch_date is not None:
+        try:
+            # Accept both date-only ("2025-07-15") and full datetime ("…T12:00:00Z").
+            ld_str = req.launch_date.strip()
+            if "T" in ld_str:
+                launch_dt = datetime.fromisoformat(ld_str.replace("Z", "+00:00"))
+            else:
+                launch_dt = datetime.fromisoformat(ld_str).replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"launch_date {req.launch_date!r} is not a valid ISO-8601 date or datetime.",
+            )
+        epoch_dt = _debris_epoch()
+        day_offset = (launch_dt - epoch_dt).total_seconds() / 86400.0
+        # Guardrail 3: cap / reject beyond TLE reliability window.
+        if day_offset > _MAX_LAUNCH_DAY_OFFSET:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"launch_date {req.launch_date!r} is {day_offset:.1f} days after the TLE epoch "
+                    f"({epoch_dt.date().isoformat()}), which exceeds the {_MAX_LAUNCH_DAY_OFFSET:.0f}-day "
+                    "TLE reliability window. Use a launch_date within 14 days of the TLE epoch."
+                ),
+            )
+        if day_offset < 0.0:
+            day_offset = 0.0  # past launch_date → treat as now, no drift
+        from app.delta_v import raan_drift_deg
+        drift = raan_drift_deg(req.start_altitude_km, req.start_inclination_deg, day_offset)
+        effective_raan_deg = req.start_raan_deg + drift
 
     if req.removal_method_filter is not None:
         if req.removal_method_filter not in _VALID_REMOVAL_METHOD_FILTERS:
@@ -653,7 +734,7 @@ def _run_plan(req: PlanRequest, *, time_limit_seconds: Optional[int] = None) -> 
         fuel_budget_km_s=req.fuel_budget_km_s,
         start_altitude_km=req.start_altitude_km,
         start_inclination_deg=req.start_inclination_deg,
-        start_raan_deg=req.start_raan_deg,
+        start_raan_deg=effective_raan_deg,
         nets_carried=req.nets_carried,
         max_wait_days=req.max_wait_days,
         min_saving_km_s=req.min_saving_km_s,
@@ -686,7 +767,7 @@ def _run_plan(req: PlanRequest, *, time_limit_seconds: Optional[int] = None) -> 
     result["depot"] = {
         "altitude_km": req.start_altitude_km,
         "inclination_deg": req.start_inclination_deg,
-        "raan_deg": req.start_raan_deg,
+        "raan_deg": effective_raan_deg,
         "latitude": 0.0,
         "longitude": 0.0,
     }
@@ -1139,6 +1220,373 @@ def compare(req: PlanRequest):
     return {
         "presets": presets_results,
         "comparison_narration": narration,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: Launch-Window Pareto Explorer
+# ---------------------------------------------------------------------------
+
+class SweepLaunchWindowRequest(BaseModel):
+    """Request body for POST /sweep-launch-window.
+
+    Launch-site vs raw-orbit path mirrors PlanRequest exactly (same validator).
+    forced_target_ids present → single_axis sweep via solve_forced_route().
+    forced_target_ids absent  → pareto_frontier sweep via _run_plan() path.
+    """
+    # --- start position (same two paths as PlanRequest) ---
+    launch_site: Optional[str] = Field(None, description="Launch site key. Mutually exclusive with raw orbit fields.")
+    inclination_deg: Optional[float] = Field(None, description="Inclination override for launch_site mode.")
+    start_altitude_km: Optional[float] = Field(None, description="Orbit altitude km. Required unless launch_site used.")
+    start_inclination_deg: Optional[float] = Field(None, description="Orbit inclination deg. Required unless launch_site used.")
+    start_raan_deg: float = Field(0.0, description="Spacecraft RAAN deg. Defaults to 0.0.")
+    # --- required ---
+    fuel_budget_km_s: float = Field(..., gt=0, description="Delta-v budget passed to each per-date solve.")
+    # --- sweep config ---
+    window_days: int = Field(14, ge=1, le=14, description="Length of the sweep window in days (1–14, capped at TLE reliability window).")
+    weights: Optional[dict[str, float]] = Field(None, description="Risk-score weight overrides; same semantics as PlanRequest.")
+    forced_target_ids: Optional[list[int]] = Field(None, description="If present, activates single_axis mode: each date solves via solve_forced_route() over this fixed target list. Absent = pareto_frontier mode via standard optimizer.")
+    # --- carry-through params ---
+    pool_size: int = Field(DEFAULT_POOL_SIZE, gt=0)
+    nets_carried: int = Field(1, ge=1)
+    max_wait_days: float = Field(0.0, ge=0, le=30)
+    min_saving_km_s: float = Field(0.0, ge=0)
+    removal_method_filter: Optional[str] = Field(None)
+    max_tle_age_days: float = Field(14.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_launch_site(cls, data: Any) -> Any:
+        """Same launch_site resolution logic as PlanRequest."""
+        if not isinstance(data, dict):
+            return data
+        has_site = data.get("launch_site") is not None
+        has_alt  = data.get("start_altitude_km") is not None
+        has_incl = data.get("start_inclination_deg") is not None
+        if has_site and not (has_alt and has_incl):
+            orbit = derive_start_orbit(
+                data["launch_site"],
+                inclination=data.get("inclination_deg"),
+                altitude_km=data.get("start_altitude_km") or 800,
+            )
+            data["start_altitude_km"]    = orbit["altitude_km"]
+            data["start_inclination_deg"] = orbit["inclination_deg"]
+            data["start_raan_deg"]        = orbit["raan_deg"]
+        elif not has_site and not (has_alt and has_incl):
+            raise ValueError(
+                "Either launch_site or both start_altitude_km and "
+                "start_inclination_deg must be provided."
+            )
+        return data
+
+
+# Per-sweep narration cache: keyed by sha256(start_position + weights + window_days + forced_target_ids).
+_sweep_narration_cache: dict[str, str] = {}
+
+
+def _sweep_cache_key(req: SweepLaunchWindowRequest) -> str:
+    """Stable sha256 hash of the fields that determine a unique sweep result."""
+    payload = json.dumps({
+        "start_altitude_km":     req.start_altitude_km,
+        "start_inclination_deg": req.start_inclination_deg,
+        "start_raan_deg":        req.start_raan_deg,
+        "launch_site":           req.launch_site,
+        "inclination_deg":       req.inclination_deg,
+        "fuel_budget_km_s":      req.fuel_budget_km_s,
+        "weights":               req.weights,
+        "window_days":           req.window_days,
+        "forced_target_ids":     sorted(req.forced_target_ids) if req.forced_target_ids else None,
+        "pool_size":             req.pool_size,
+        "nets_carried":          req.nets_carried,
+        "max_wait_days":         req.max_wait_days,
+        "min_saving_km_s":       req.min_saving_km_s,
+        "removal_method_filter": req.removal_method_filter,
+        "max_tle_age_days":      req.max_tle_age_days,
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _worst_data_quality(route_details: list[dict]) -> str:
+    """Return the worst data_quality label among the visited debris in a result.
+    Ranking: stale > aging > fresh. Falls back to 'unknown' if no details."""
+    rank = {"stale": 2, "aging": 1, "fresh": 0, "unknown": -1}
+    worst = "fresh"
+    for d in route_details:
+        q = d.get("data_quality", "unknown")
+        if rank.get(q, -1) > rank.get(worst, 0):
+            worst = q
+    if not route_details:
+        return "unknown"
+    return worst
+
+
+def _explain_sweep(
+    window: list[dict[str, Any]],
+    sweep_mode: str,
+    lowest_fuel_date: dict[str, Any],
+) -> Optional[str]:
+    """Single LLM narration call over the full sweep result set.
+
+    Prompt references only computed numbers (fuel cost, risk, frontier flags).
+    In pareto_frontier mode lowest_fuel_date is explicitly framed as one
+    reference point, not 'the' recommendation.
+    Returns None on failure so callers degrade gracefully."""
+    # Build a compact summary: only include fields relevant to the narration.
+    summary_rows = [
+        {
+            "day_offset":           r["day_offset"],
+            "launch_date":          r["launch_date"],
+            "total_fuel_cost_km_s": r.get("total_fuel_cost_km_s"),
+            "total_risk_collected": r.get("total_risk_collected"),
+            "is_pareto_optimal":    r.get("is_pareto_optimal"),
+            "visited_count":        r.get("visited_count"),
+        }
+        for r in window
+        if "error" not in r
+    ]
+
+    if sweep_mode == "pareto_frontier":
+        mode_context = (
+            "This is a two-axis Pareto sweep: both fuel cost and risk collected vary by date "
+            "because the optimizer selects different debris objects on different days. "
+            f"The lowest-fuel date is day_offset={lowest_fuel_date['day_offset']} "
+            f"({lowest_fuel_date['launch_date']}), but this is only one reference point on "
+            "the frontier — a different date may collect more risk at higher fuel cost, which "
+            "is a valid trade-off depending on operator priorities. "
+            "Do NOT imply that the lowest-fuel date is 'the best' or 'recommended'."
+        )
+    else:
+        mode_context = (
+            "This is a single-axis sweep: the target list is fixed (Custom Selection mode), "
+            "so risk collected is constant across all dates. Only fuel cost varies. "
+            f"The lowest-fuel date is day_offset={lowest_fuel_date['day_offset']} "
+            f"({lowest_fuel_date['launch_date']}), which is the unambiguous optimum since "
+            "risk cannot be improved by a different date."
+        )
+
+    prompt = (
+        "You are a mission-planning analyst for an orbital debris removal programme. "
+        "A launch-window sweep was run over a 14-day window, solving an independent route "
+        "for each candidate launch date using J2 RAAN drift to project the spacecraft's "
+        "orbital plane forward. Each date's fuel cost and risk collected reflect the "
+        "deterministic route the optimizer found for that specific starting RAAN. "
+        + mode_context + " "
+        "Write exactly 2-3 plain-English sentences summarising the sweep results: "
+        "describe the range of fuel costs, highlight which dates are Pareto-optimal "
+        "(or the best date in single-axis mode), and note any visible trend. "
+        "Output only the narration — no JSON, no markdown, no preamble.\n\n"
+        + json.dumps(summary_rows)
+    )
+    try:
+        resp = _groq_client().chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.error("[sweep] LLM narration failed: %s", exc)
+        return None
+
+
+@app.post("/sweep-launch-window")
+def sweep_launch_window(req: SweepLaunchWindowRequest):
+    """Launch-Window Pareto Explorer — Feature 4.
+
+    Sweeps window_days candidate launch dates, solving an independent route for
+    each via J2 RAAN drift projection.  Returns a Pareto frontier (two-axis,
+    fuel vs risk) when forced_target_ids is absent, or a single-axis best-date
+    result when a fixed target list is present.
+
+    Response shape: see spec (sweep_mode, window[], lowest_fuel_date, narration, echo).
+    """
+    from app.delta_v import raan_drift_deg
+    from app.optimizer import _build_depot_node
+
+    # STRUCTURAL: _get_scored_field MUST come before _debris_epoch() to ensure
+    # the TLE cache file exists when _debris_epoch() reads its mtime.
+    scored_all = _get_scored_field(weights=req.weights)
+    if not scored_all:
+        raise HTTPException(status_code=502, detail="Debris field empty -- Celestrak fetch may have failed")
+
+    # Validate forced_target_ids early (before spawning threads).
+    forced_targets: Optional[list[dict]] = None
+    if req.forced_target_ids:
+        id_to_obj: dict[int, dict] = {o["norad_id"]: o for o in scored_all}
+        missing = [i for i in req.forced_target_ids if i not in id_to_obj]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"forced_target_ids not found in current debris field: {missing}",
+            )
+        forced_targets = [id_to_obj[i] for i in req.forced_target_ids]
+
+    # Validate removal_method_filter if present.
+    if req.removal_method_filter is not None and req.removal_method_filter not in _VALID_REMOVAL_METHOD_FILTERS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"removal_method_filter must be one of {sorted(_VALID_REMOVAL_METHOD_FILTERS)} "
+                f"or omitted, got {req.removal_method_filter!r}."
+            ),
+        )
+
+    # Single frozen epoch for the entire sweep — called once here, passed into
+    # every per-date worker.  A mid-sweep Celestrak refresh would otherwise give
+    # different points on the same chart different anchors, corrupting comparisons.
+    epoch_dt = _debris_epoch()
+
+    def _day_to_launch_date(day_offset: float) -> str:
+        """Convert day_offset (float) to ISO-8601 string anchored to epoch_dt.
+        Whole-number offsets return date-only strings; fractional return full datetime."""
+        dt = epoch_dt + timedelta(days=day_offset)
+        if day_offset == int(day_offset):
+            return dt.date().isoformat()
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _solve_one_date(day_offset: float) -> dict[str, Any]:
+        """Run a single date solve and return a window-entry dict."""
+        drift = raan_drift_deg(req.start_altitude_km, req.start_inclination_deg, day_offset)
+        shifted_raan = req.start_raan_deg + drift
+        launch_date_str = _day_to_launch_date(day_offset)
+
+        if forced_targets is not None:
+            # Custom Selection branch: solve_forced_route, NOT _run_plan.
+            result = solve_forced_route(
+                targets=forced_targets,
+                start_altitude_km=req.start_altitude_km,
+                start_inclination_deg=req.start_inclination_deg,
+                start_raan_deg=shifted_raan,
+                fuel_budget_km_s=req.fuel_budget_km_s,
+                max_wait_days=req.max_wait_days,
+                min_saving_km_s=req.min_saving_km_s,
+            )
+        else:
+            # Standard optimizer path: build a PlanRequest for this date's RAAN.
+            date_req = PlanRequest(
+                start_altitude_km=req.start_altitude_km,
+                start_inclination_deg=req.start_inclination_deg,
+                start_raan_deg=shifted_raan,
+                fuel_budget_km_s=req.fuel_budget_km_s,
+                pool_size=req.pool_size,
+                weights=req.weights,
+                nets_carried=req.nets_carried,
+                max_wait_days=req.max_wait_days,
+                min_saving_km_s=req.min_saving_km_s,
+                removal_method_filter=req.removal_method_filter,
+                max_tle_age_days=req.max_tle_age_days,
+                # launch_date intentionally NOT passed here: the sweep already
+                # applied the drift via shifted_raan directly.  Passing launch_date
+                # into _run_plan would double-apply the drift.
+            )
+            try:
+                result = _run_plan(date_req)
+            except HTTPException as exc:
+                return {
+                    "day_offset": day_offset,
+                    "launch_date": launch_date_str,
+                    "error": str(exc.detail),
+                }
+
+        if "error" in result:
+            return {
+                "day_offset": day_offset,
+                "launch_date": launch_date_str,
+                "error": result["error"],
+            }
+
+        route_details = result.get("route_details", [])
+        return {
+            "day_offset":            day_offset,
+            "launch_date":           launch_date_str,
+            "total_fuel_cost_km_s":  result.get("total_fuel_cost_km_s", 0.0),
+            "total_risk_collected":  result.get("total_risk_collected", 0.0),
+            "visited_count":         result.get("visited_count", 0),
+            "data_quality":          _worst_data_quality(route_details),
+        }
+
+    # --- Coarse sweep: day_offsets 0.0 .. window_days, one per day ---
+    coarse_offsets = [float(d) for d in range(req.window_days + 1)]
+
+    with ThreadPoolExecutor(max_workers=min(len(coarse_offsets), 8)) as pool_exec:
+        futures = [pool_exec.submit(_solve_one_date, off) for off in coarse_offsets]
+        coarse_results: list[dict[str, Any]] = [f.result() for f in futures]
+
+    # --- Refine pass: ±0.5 around local fuel-cost minima ---
+    # A coarse result is a local minimum if it is valid (no "error") and its
+    # total_fuel_cost_km_s is strictly less than both its neighbours.
+    refine_offsets: list[float] = []
+    for i, r in enumerate(coarse_results):
+        if "error" in r:
+            continue
+        fuel = r["total_fuel_cost_km_s"]
+        prev_fuel = coarse_results[i - 1]["total_fuel_cost_km_s"] if i > 0 and "error" not in coarse_results[i - 1] else float("inf")
+        next_fuel = coarse_results[i + 1]["total_fuel_cost_km_s"] if i < len(coarse_results) - 1 and "error" not in coarse_results[i + 1] else float("inf")
+        if fuel < prev_fuel and fuel < next_fuel:
+            off = r["day_offset"]
+            if off - 0.5 >= 0.0:
+                refine_offsets.append(off - 0.5)
+            if off + 0.5 <= float(req.window_days):
+                refine_offsets.append(off + 0.5)
+
+    refined_results: list[dict[str, Any]] = []
+    if refine_offsets:
+        with ThreadPoolExecutor(max_workers=min(len(refine_offsets), 8)) as pool_exec:
+            futures = [pool_exec.submit(_solve_one_date, off) for off in refine_offsets]
+            refined_results = [f.result() for f in futures]
+
+    # Merge coarse + refined into a single window, sorted by day_offset.
+    window_raw = coarse_results + refined_results
+    window_raw.sort(key=lambda r: r["day_offset"])
+
+    # --- Frontier filter ---
+    forced_flag = req.forced_target_ids is not None
+    annotated_window, sweep_mode = compute_pareto_frontier(window_raw, forced=forced_flag)
+
+    # --- lowest_fuel_date: lowest fuel among valid results (tie → lower day_offset) ---
+    valid_window = [r for r in annotated_window if "error" not in r]
+    lowest_fuel_entry = min(
+        valid_window,
+        key=lambda r: (r["total_fuel_cost_km_s"], r["day_offset"]),
+        default=None,
+    )
+    lowest_fuel_date = (
+        {"day_offset": lowest_fuel_entry["day_offset"], "launch_date": lowest_fuel_entry["launch_date"]}
+        if lowest_fuel_entry is not None
+        else None
+    )
+
+    # --- LLM narration (single call, cached) ---
+    cache_key = _sweep_cache_key(req)
+    if cache_key in _sweep_narration_cache:
+        narration = _sweep_narration_cache[cache_key]
+    else:
+        narration = _explain_sweep(annotated_window, sweep_mode, lowest_fuel_date or {})
+        if narration:
+            _sweep_narration_cache[cache_key] = narration
+
+    # --- Build echo ---
+    echo_start: dict[str, Any] = {
+        "start_altitude_km":     req.start_altitude_km,
+        "start_inclination_deg": req.start_inclination_deg,
+        "start_raan_deg":        req.start_raan_deg,
+    }
+    if req.launch_site:
+        echo_start["launch_site"] = req.launch_site
+    if req.inclination_deg is not None:
+        echo_start["inclination_deg"] = req.inclination_deg
+
+    return {
+        "sweep_mode":       sweep_mode,
+        "window":           annotated_window,
+        "lowest_fuel_date": lowest_fuel_date,
+        "narration":        narration,
+        "echo": {
+            "start_position":    echo_start,
+            "weights":           req.weights,
+            "window_days":       req.window_days,
+            "forced_target_ids": req.forced_target_ids,
+        },
     }
 
 

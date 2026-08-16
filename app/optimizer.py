@@ -631,6 +631,95 @@ def solve_forced_route(
     return result
 
 
+def compute_pareto_frontier(
+    results: list[dict[str, Any]],
+    *,
+    forced: bool,
+) -> tuple[list[dict[str, Any]], str]:
+    """Mark each date result is_pareto_optimal and determine sweep_mode.
+
+    Parameters
+    ----------
+    results : list of per-date solve dicts (each must have at least
+              total_fuel_cost_km_s, total_risk_collected; results with an
+              "error" key are excluded from computation and marked False).
+    forced  : True iff forced_target_ids was NOT None in the sweep request.
+              sweep_mode is set DIRECTLY from this boolean — never inferred
+              from comparing risk values across results.
+
+    Returns
+    -------
+    (annotated_results, sweep_mode)
+      annotated_results : new list with is_pareto_optimal added to each dict.
+      sweep_mode        : "single_axis" if forced, else "pareto_frontier".
+
+    Single-axis mode (forced=True):
+        Target list fixed → total_risk_collected is nominally constant.
+        Mark only the single lowest-fuel date is_pareto_optimal=True.
+        Ties broken by lower day_offset.
+
+    Pareto-frontier mode (forced=False):
+        A date D is Pareto-optimal if no other valid date D' satisfies BOTH:
+          D'.total_fuel_cost_km_s <= D.total_fuel_cost_km_s  (better/equal fuel)
+          D'.total_risk_collected  >= D.total_risk_collected  (better/equal risk)
+        with at least one strict inequality.
+
+    Pure deterministic function — no LLM, no I/O, unit-testable in isolation.
+    """
+    sweep_mode = "single_axis" if forced else "pareto_frontier"
+
+    # Separate valid results (can participate in frontier) from errored ones.
+    valid = [r for r in results if "error" not in r]
+    errored_ids = {id(r) for r in results if "error" in r}
+
+    annotated: list[dict[str, Any]] = []
+
+    if forced:
+        # Single-axis: mark only the single lowest-fuel valid date as optimal.
+        # Ties broken by lower day_offset (earlier is preferred).
+        best: dict[str, Any] | None = None
+        for r in valid:
+            if best is None:
+                best = r
+            else:
+                r_fuel = r.get("total_fuel_cost_km_s", float("inf"))
+                b_fuel = best.get("total_fuel_cost_km_s", float("inf"))
+                if r_fuel < b_fuel or (r_fuel == b_fuel and r.get("day_offset", float("inf")) < best.get("day_offset", float("inf"))):
+                    best = r
+        best_id = id(best) if best is not None else None
+
+        for r in results:
+            annotated.append({**r, "is_pareto_optimal": (id(r) == best_id)})
+
+    else:
+        # Pareto-frontier: real two-axis dominance check.
+        # A result is dominated if there exists another valid result with both
+        # lower-or-equal fuel cost AND higher-or-equal risk, with at least one
+        # strict inequality.  Non-dominated = is_pareto_optimal.
+        def is_dominated(candidate: dict[str, Any]) -> bool:
+            c_fuel = candidate.get("total_fuel_cost_km_s", float("inf"))
+            c_risk = candidate.get("total_risk_collected", 0.0)
+            for other in valid:
+                if id(other) == id(candidate):
+                    continue
+                o_fuel = other.get("total_fuel_cost_km_s", float("inf"))
+                o_risk = other.get("total_risk_collected", 0.0)
+                # Other dominates candidate if it is at least as good on both axes
+                # and strictly better on at least one.
+                if o_fuel <= c_fuel and o_risk >= c_risk:
+                    if o_fuel < c_fuel or o_risk > c_risk:
+                        return True
+            return False
+
+        for r in results:
+            if id(r) in errored_ids:
+                annotated.append({**r, "is_pareto_optimal": False})
+            else:
+                annotated.append({**r, "is_pareto_optimal": not is_dominated(r)})
+
+    return annotated, sweep_mode
+
+
 if __name__ == "__main__":
     import random
 
