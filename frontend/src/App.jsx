@@ -1124,40 +1124,34 @@ export default function App() {
               <span className="dashboard-section-title">History</span>
             </button>
 
-            {/* Workspace tab — disabled until there is at least one history entry */}
-            {(() => {
-              const workspaceEnabled = history.length > 0
-              return (
+            {/* Workspace tab — always clickable */}
+            <button
+              className={`dashboard-tab${activePanel === 'workspace' ? ' dashboard-tab--active' : ''}`}
+              role="tab"
+              aria-selected={activePanel === 'workspace'}
+              onClick={() => setActivePanel('workspace')}
+              data-testid="panel-tab-workspace"
+            >
+              {activeWorkspaceEntry ? (
+                <span className="dashboard-section-title" data-testid="workspace-title">
+                  Workspace #{getEntryNumber(activeWorkspaceEntry.id)}
+                </span>
+              ) : (
+                <span className="dashboard-section-title workspace-title--empty" data-testid="workspace-title">
+                  Workspace
+                </span>
+              )}
+              {activeWorkspaceEntry && (
                 <button
-                  className={`dashboard-tab${activePanel === 'workspace' ? ' dashboard-tab--active' : ''}${!workspaceEnabled ? ' dashboard-tab--disabled' : ''}`}
-                  role="tab"
-                  aria-selected={activePanel === 'workspace'}
-                  disabled={!workspaceEnabled}
-                  onClick={() => { if (workspaceEnabled) setActivePanel('workspace') }}
-                  data-testid="panel-tab-workspace"
+                  className="btn workspace-close-btn"
+                  data-testid="workspace-close-btn"
+                  aria-label="Clear workspace"
+                  onClick={(e) => { e.stopPropagation(); setActiveWorkspaceId(null) }}
                 >
-                  {activeWorkspaceEntry ? (
-                    <span className="dashboard-section-title" data-testid="workspace-title">
-                      Workspace #{getEntryNumber(activeWorkspaceEntry.id)}
-                    </span>
-                  ) : (
-                    <span className={`dashboard-section-title${!workspaceEnabled ? ' workspace-title--empty' : ''}`} data-testid="workspace-title">
-                      Workspace
-                    </span>
-                  )}
-                  {activeWorkspaceEntry && (
-                    <button
-                      className="btn workspace-close-btn"
-                      data-testid="workspace-close-btn"
-                      aria-label="Clear workspace"
-                      onClick={(e) => { e.stopPropagation(); setActiveWorkspaceId(null) }}
-                    >
-                      ✕
-                    </button>
-                  )}
+                  ✕
                 </button>
-              )
-            })()}
+              )}
+            </button>
 
           </div>{/* end tab bar */}
 

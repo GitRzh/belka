@@ -134,6 +134,10 @@ beforeEach(() => {
 describe('1. Empty state — Workspace placeholder', () => {
   it('renders "Workspace" (no #N) and empty-label when no entry is active', async () => {
     render(<App />)
+    await waitFor(() => screen.getByTestId('panel-tab-workspace'))
+
+    // Switch to the Workspace panel (now always clickable)
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-workspace')) })
     await waitFor(() => expect(screen.getByTestId('section-workspace')).toBeInTheDocument())
 
     const title = screen.getByTestId('workspace-title')
@@ -150,10 +154,14 @@ describe('2. Generate Plan → history entry + Workspace opens', () => {
 
     await clickGeneratePlan()
 
-    await waitFor(() => expect(screen.getByTestId('history-tab-1')).toBeInTheDocument())
+    // Generate Plan auto-navigates to Workspace — check workspace title first
     await waitForWorkspaceTitle(/Workspace #1/)
     expect(screen.queryByTestId('workspace-empty-label')).not.toBeInTheDocument()
     expect(api.plan).toHaveBeenCalledTimes(1)
+
+    // Switch to History panel to verify the tab was created
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-history')) })
+    await waitFor(() => expect(screen.getByTestId('history-tab-1')).toBeInTheDocument())
   })
 })
 
@@ -162,18 +170,31 @@ describe('3. Two entries — tab #1 click replaces Workspace from #2 to #1', () 
     render(<App />)
     await waitFor(() => screen.getByRole('button', { name: /generate plan/i }))
 
+    // First plan — auto-navigates to workspace
     await clickGeneratePlan()
-    await waitFor(() => screen.getByTestId('history-tab-1'))
+    await waitForWorkspaceTitle(/Workspace #1/)
 
+    // Switch back to parameters to generate second plan
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-parameters')) })
+
+    // Second plan — auto-navigates to workspace #2
     await clickGeneratePlan()
-    await waitFor(() => screen.getByTestId('history-tab-2'))
     await waitForWorkspaceTitle(/Workspace #2/)
 
+    // Switch to history to see both tabs and click tab #1
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-history')) })
+    await waitFor(() => screen.getByTestId('history-tab-2'))
     await act(async () => { fireEvent.click(screen.getByTestId('history-tab-1')) })
 
+    // Clicking a history tab switches to workspace with that entry
     await waitForWorkspaceTitle(/Workspace #1/)
-    expect(screen.getByTestId('history-tab-2')).toBeInTheDocument()
+
+    // workspace-title lives in the tab bar — always exactly one
     expect(screen.getAllByTestId('workspace-title')).toHaveLength(1)
+
+    // Switch to history to confirm tab-2 still exists
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-history')) })
+    expect(screen.getByTestId('history-tab-2')).toBeInTheDocument()
   })
 })
 
@@ -183,11 +204,17 @@ describe('4. Replan — same #N, no new tab, in-place update', () => {
     await waitFor(() => screen.getByRole('button', { name: /generate plan/i }))
 
     await clickGeneratePlan()
-    await waitFor(() => screen.getByTestId('history-tab-1'))
+    // Generate Plan auto-navigates to Workspace
     await waitForWorkspaceTitle(/Workspace #1/)
 
+    // Switch to History to assert exactly 1 tab, then click it to activate workspace entry
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-history')) })
+    await waitFor(() => screen.getByTestId('history-tab-1'))
     expect(screen.getAllByTestId(/^history-tab-\d+$/)).toHaveLength(1)
+    await act(async () => { fireEvent.click(screen.getByTestId('history-tab-1')) })
+    await waitForWorkspaceTitle(/Workspace #1/)
 
+    // The replan textarea and button are in the workspace panel
     const textarea = screen.getByPlaceholderText(/prioritize risk over fuel/i)
     await act(async () => { fireEvent.change(textarea, { target: { value: 'more risk focus' } }) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /apply changes/i })) })
@@ -195,6 +222,9 @@ describe('4. Replan — same #N, no new tab, in-place update', () => {
     await waitFor(() => expect(api.replan).toHaveBeenCalledTimes(1))
 
     await waitForWorkspaceTitle(/Workspace #1/)
+
+    // Switch to History to confirm still exactly 1 tab
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-history')) })
     expect(screen.getAllByTestId(/^history-tab-\d+$/)).toHaveLength(1)
     expect(screen.queryByTestId('history-tab-2')).not.toBeInTheDocument()
   })
@@ -206,8 +236,15 @@ describe('5. History tabs — vertical column, overflow-y scrollable', () => {
     await waitFor(() => screen.getByRole('button', { name: /generate plan/i }))
 
     for (let i = 0; i < 6; i++) {
+      // Each plan auto-navigates to workspace; switch back to parameters before the next one
       await clickGeneratePlan()
+      if (i < 5) {
+        await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-parameters')) })
+      }
     }
+
+    // After 6th plan we're on workspace — switch to history to inspect the tab-row
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-history')) })
     await waitFor(() => expect(screen.getByTestId('history-tab-6')).toBeInTheDocument())
 
     const row = screen.getByTestId('history-tab-row')
@@ -226,15 +263,19 @@ describe('6. Workspace ✕ — empty state; history entry persists', () => {
     await waitFor(() => screen.getByRole('button', { name: /generate plan/i }))
 
     await clickGeneratePlan()
-    await waitFor(() => screen.getByTestId('history-tab-1'))
+    // Generate Plan auto-navigates to Workspace
     await waitForWorkspaceTitle(/Workspace #1/)
 
+    // Click the ✕ close button — clears the active entry, stays on workspace panel
     await act(async () => { fireEvent.click(screen.getByTestId('workspace-close-btn')) })
 
     await waitFor(() => expect(screen.getByTestId('workspace-title').textContent.trim()).toBe('Workspace'))
     expect(screen.getByTestId('workspace-empty-label')).toBeInTheDocument()
     expect(screen.queryByTestId('workspace-close-btn')).not.toBeInTheDocument()
-    expect(screen.getByTestId('history-tab-1')).toBeInTheDocument()
+
+    // Switch to History panel to verify the entry tab is still there
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-history')) })
+    await waitFor(() => expect(screen.getByTestId('history-tab-1')).toBeInTheDocument())
   })
 })
 
@@ -300,52 +341,40 @@ describe('8. Custom Selection Filter — in Parameters section, toggles mode', (
 
 // ─── Layout patch tests ───────────────────────────────────────────────────────
 
-describe('LP1. Three columns side-by-side (not stacked)', () => {
-  it('Parameters, History, Workspace are three distinct column sections in that order', async () => {
+describe('Dashboard uses a single-pane tab switcher, not simultaneous columns', () => {
+  it('all three tab buttons exist in the tablist in order; only one panel mounts at a time', async () => {
     render(<App />)
     await waitFor(() => screen.getByTestId('dashboard-column'))
 
-    const dashboard = screen.getByTestId('dashboard-column')
-    const params    = screen.getByTestId('section-parameters')
-    const history   = screen.getByTestId('section-history')
-    const workspace = screen.getByTestId('section-workspace')
+    const tablist = screen.getByRole('tablist')
 
-    // All three are children of the dashboard column
-    expect(dashboard).toContainElement(params)
-    expect(dashboard).toContainElement(history)
-    expect(dashboard).toContainElement(workspace)
+    // 1. All three tab buttons exist inside the tablist
+    const paramTab     = screen.getByTestId('panel-tab-parameters')
+    const historyTab   = screen.getByTestId('panel-tab-history')
+    const workspaceTab = screen.getByTestId('panel-tab-workspace')
+    expect(tablist).toContainElement(paramTab)
+    expect(tablist).toContainElement(historyTab)
+    expect(tablist).toContainElement(workspaceTab)
 
-    // They appear in DOM order: parameters first, history second, workspace third
-    const children = Array.from(dashboard.children)
-    expect(children.indexOf(params)).toBeLessThan(children.indexOf(history))
-    expect(children.indexOf(history)).toBeLessThan(children.indexOf(workspace))
+    // They appear in DOM order: parameters, history, workspace
+    const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'))
+    expect(tabs.indexOf(paramTab)).toBeLessThan(tabs.indexOf(historyTab))
+    expect(tabs.indexOf(historyTab)).toBeLessThan(tabs.indexOf(workspaceTab))
 
-    // Dashboard carries the class that sets flex-direction: row
-    expect(dashboard.className).toContain('dashboard-column')
-  })
-})
+    // 2. Initial render: only Parameters panel body is mounted
+    expect(screen.getByTestId('section-parameters')).toBeInTheDocument()
+    expect(screen.queryByTestId('history-tab-row')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('section-workspace')).not.toBeInTheDocument()
 
-describe('LP2. Workspace column is wider than Parameters and History', () => {
-  it('Workspace offsetWidth > Parameters offsetWidth AND > History offsetWidth', async () => {
-    render(<App />)
-    await waitFor(() => screen.getByTestId('dashboard-column'))
+    // 3. Click History tab → history-tab-row mounts, section-parameters unmounts
+    await act(async () => { fireEvent.click(historyTab) })
+    await waitFor(() => expect(screen.getByTestId('history-tab-row')).toBeInTheDocument())
+    expect(screen.queryByTestId('section-parameters')).not.toBeInTheDocument()
 
-    const params    = screen.getByTestId('section-parameters')
-    const history   = screen.getByTestId('section-history')
-    const workspace = screen.getByTestId('section-workspace')
-
-    // jsdom lays out with offsetWidth=0 by default, but we can verify via the
-    // CSS classes applied: dashboard-section--workspace has flex:1 1 auto
-    // (takes all remaining space), while --parameters and --history have fixed widths.
-    // We assert via className since jsdom doesn't do real layout arithmetic.
-    expect(workspace.className).toContain('dashboard-section--workspace')
-    expect(params.className).toContain('dashboard-section--parameters')
-    expect(history.className).toContain('dashboard-section--history')
-
-    // The CSS file sets fixed px widths for params/history and flex:1 for workspace.
-    // In a real browser workspace will always be wider. Assert the class contract.
-    expect(workspace.className).not.toContain('dashboard-section--parameters')
-    expect(workspace.className).not.toContain('dashboard-section--history')
+    // 4. Click Workspace tab → section-workspace mounts, history-tab-row unmounts
+    await act(async () => { fireEvent.click(workspaceTab) })
+    await waitFor(() => expect(screen.getByTestId('section-workspace')).toBeInTheDocument())
+    expect(screen.queryByTestId('history-tab-row')).not.toBeInTheDocument()
   })
 })
 
@@ -371,7 +400,11 @@ describe('LP3. Parameters form uses 2-column grid (.form-grid)', () => {
 describe('LP4. History tabs: vertical stack, section scrolls vertically', () => {
   it('history-tab-row has flex-direction:column class and no horizontal overflow', async () => {
     render(<App />)
-    await waitFor(() => screen.getByTestId('section-history'))
+    await waitFor(() => screen.getByTestId('panel-tab-history'))
+
+    // Switch to the History panel so history-tab-row is mounted
+    await act(async () => { fireEvent.click(screen.getByTestId('panel-tab-history')) })
+    await waitFor(() => expect(screen.getByTestId('history-tab-row')).toBeInTheDocument())
 
     const row = screen.getByTestId('history-tab-row')
     // Class applies flex-direction:column + overflow-y:auto
@@ -380,10 +413,6 @@ describe('LP4. History tabs: vertical stack, section scrolls vertically', () => 
     // Inline style must not have overflow-x: auto (that was the old horizontal layout)
     expect(row.style.overflowX).not.toBe('auto')
     expect(row.style.flexDirection).not.toBe('row')
-
-    // History section carries the right class for its column width
-    const section = screen.getByTestId('section-history')
-    expect(section.className).toContain('dashboard-section--history')
   })
 })
 
