@@ -66,10 +66,17 @@ beforeEach(() => {
 
 describe('1) Renders null when step prop is null', () => {
   it('returns null when step is null', () => {
+    // fromNoradId/toNoradId are null here on purpose: this test is only
+    // about the `if (!step) return null` early-return path, so it
+    // shouldn't also trigger the fetch effect (which guards on non-null
+    // ids). Passing real ids here previously caused an unawaited
+    // getLegExplanation call to resolve after this synchronous test had
+    // already finished, producing an unflushed act() warning.
     const { container } = render(
-      <LegDetailPanel step={null} fromNoradId={-1} toNoradId={25544} legIndex={1} onClose={vi.fn()} />
+      <LegDetailPanel step={null} fromNoradId={null} toNoradId={null} legIndex={1} onClose={vi.fn()} />
     )
     expect(container.firstChild).toBeNull()
+    expect(api.getLegExplanation).not.toHaveBeenCalled()
   })
 })
 
@@ -220,11 +227,15 @@ describe('5) J2 nodal drift wait section', () => {
 })
 
 describe('6) Close button calls onClose', () => {
-  it('calls onClose when clicked', () => {
+  it('calls onClose when clicked', async () => {
     const onClose = vi.fn()
     render(
       <LegDetailPanel step={STEP} fromNoradId={-1} toNoradId={25544} legIndex={1} onClose={onClose} />
     )
+    // Let the on-mount getLegExplanation fetch resolve and flush before
+    // asserting, so the state update it triggers doesn't land after the
+    // test has already finished (unflushed act() warning).
+    await waitFor(() => expect(api.getLegExplanation).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: /close leg detail panel/i }))
     expect(onClose).toHaveBeenCalledTimes(1)
   })

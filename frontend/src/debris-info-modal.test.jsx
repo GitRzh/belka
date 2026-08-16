@@ -122,7 +122,7 @@ describe('2) Info tab: loading/fetched/error', () => {
 })
 
 describe('3) Tab bar renders only when debris is in activeRouteNoradIds', () => {
-  it('does NOT show tab bar when activeRouteNoradIds is null', () => {
+  it('does NOT show tab bar when activeRouteNoradIds is null', async () => {
     render(
       <DebrisInfoModal
         debris={DEBRIS}
@@ -132,10 +132,11 @@ describe('3) Tab bar renders only when debris is in activeRouteNoradIds', () => 
         activeRouteNoradIds={null}
       />
     )
+    await waitFor(() => expect(api.getDebrisById).toHaveBeenCalledTimes(1))
     expect(screen.queryByRole('tablist')).toBeNull()
   })
 
-  it('does NOT show tab bar when debris.norad_id not in activeRouteNoradIds', () => {
+  it('does NOT show tab bar when debris.norad_id not in activeRouteNoradIds', async () => {
     render(
       <DebrisInfoModal
         debris={DEBRIS}
@@ -145,6 +146,7 @@ describe('3) Tab bar renders only when debris is in activeRouteNoradIds', () => 
         activeRouteNoradIds={new Set([99999])}
       />
     )
+    await waitFor(() => expect(api.getDebrisById).toHaveBeenCalledTimes(1))
     expect(screen.queryByRole('tablist')).toBeNull()
   })
 
@@ -158,13 +160,14 @@ describe('3) Tab bar renders only when debris is in activeRouteNoradIds', () => 
         activeRouteNoradIds={new Set([DEBRIS.norad_id])}
       />
     )
+    await waitFor(() => expect(api.getDebrisById).toHaveBeenCalledTimes(1))
     expect(screen.getByRole('tablist')).toBeInTheDocument()
     // default tab is 'reason'
     const reasonTab = screen.getByRole('tab', { name: 'Reason' })
     expect(reasonTab).toHaveAttribute('aria-selected', 'true')
   })
 
-  it('default active tab is "info" when not in activeRouteNoradIds', () => {
+  it('default active tab is "info" when not in activeRouteNoradIds', async () => {
     render(
       <DebrisInfoModal
         debris={DEBRIS}
@@ -174,6 +177,7 @@ describe('3) Tab bar renders only when debris is in activeRouteNoradIds', () => 
         activeRouteNoradIds={new Set([99999])}
       />
     )
+    await waitFor(() => expect(api.getDebrisById).toHaveBeenCalledTimes(1))
     // No tablist means info is the only (implicit) view; just verify no tab
     expect(screen.queryByRole('tab', { name: 'Reason' })).toBeNull()
   })
@@ -364,20 +368,25 @@ describe('7) Alternatives list renders only when present and reasoning_unavailab
 })
 
 describe('8) Pin and Close buttons', () => {
-  it('calls onPin when Pin button is clicked', () => {
+  it('calls onPin when Pin button is clicked', async () => {
     const onPin = vi.fn()
     render(
       <DebrisInfoModal debris={DEBRIS} pinned={false} onPin={onPin} onClose={vi.fn()} />
     )
+    // Let the on-mount getDebrisById fetch resolve and flush before
+    // asserting, so the state update it triggers doesn't land after the
+    // test has already finished (unflushed act() warning).
+    await waitFor(() => expect(api.getDebrisById).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: /pin/i }))
     expect(onPin).toHaveBeenCalledTimes(1)
   })
 
-  it('calls onClose when Close button is clicked', () => {
+  it('calls onClose when Close button is clicked', async () => {
     const onClose = vi.fn()
     render(
       <DebrisInfoModal debris={DEBRIS} pinned={false} onPin={vi.fn()} onClose={onClose} />
     )
+    await waitFor(() => expect(api.getDebrisById).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: /close debris panel/i }))
     expect(onClose).toHaveBeenCalledTimes(1)
   })
