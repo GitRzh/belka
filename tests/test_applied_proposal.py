@@ -109,9 +109,10 @@ _FAKE_PLAN_B: dict[str, Any] = {
 
 def _patched_run_plan_factory(call_count_holder: list):
     """Returns a fake _run_plan that returns PLAN_A on the first call (old_plan)
-    and PLAN_B on all subsequent calls (new_plan), tracking call count."""
+    and PLAN_B on all subsequent calls (new_plan), tracking call count.
+    Accepts **kwargs so the exclude_norad_ids= keyword argument doesn't crash."""
     import copy
-    def fake(req):
+    def fake(req, **kwargs):
         call_count_holder[0] += 1
         if call_count_holder[0] == 1:
             return copy.deepcopy(_FAKE_PLAN_A)
@@ -364,11 +365,11 @@ class TestAppliedProposalIdenticalToFreeText:
         plan_sequence_a = [0]
         plan_sequence_b = [0]
 
-        def fake_run_plan_a(req):
+        def fake_run_plan_a(req, **kwargs):
             plan_sequence_a[0] += 1
             return copy.deepcopy(_FAKE_PLAN_A if plan_sequence_a[0] == 1 else _FAKE_PLAN_B)
 
-        def fake_run_plan_b(req):
+        def fake_run_plan_b(req, **kwargs):
             plan_sequence_b[0] += 1
             return copy.deepcopy(_FAKE_PLAN_A if plan_sequence_b[0] == 1 else _FAKE_PLAN_B)
 
@@ -490,7 +491,7 @@ class TestRealProposalShapeRegression:
 
         call_count = [0]
 
-        def fake_run_plan(req):
+        def fake_run_plan(req, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return copy.deepcopy(_FAKE_PLAN_A)

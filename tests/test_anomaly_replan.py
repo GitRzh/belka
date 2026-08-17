@@ -99,10 +99,12 @@ _FAKE_PLAN_B: dict[str, Any] = {
 
 
 def _run_plan_factory(old_plan, new_plan):
-    """Returns a fake _run_plan: first call → old_plan, subsequent → new_plan."""
+    """Returns a fake _run_plan: first call → old_plan, subsequent → new_plan.
+    Accepts **kwargs so callers that pass keyword-only arguments (e.g.
+    exclude_norad_ids=) don't crash the stub."""
     call_count = [0]
 
-    def _fake(req):
+    def _fake(req, **kwargs):
         call_count[0] += 1
         return copy.deepcopy(old_plan if call_count[0] == 1 else new_plan)
 
@@ -484,33 +486,24 @@ class TestOldPlanExcludeNoradIdsNotLeaked:
 
     def test_excluded_id_absent_from_new_plan(self, monkeypatch):
         """
-        Complementary check: the _run_plan() filter still removes 11111 when
-        called with a ReplanRequest that has exclude_norad_ids=[11111].
-
-        This tests the filter at the _run_plan() layer directly (same pattern as
-        TestExcludeNoradIdsFilter) rather than through _execute_overrides(),
-        because _execute_overrides() builds new_req as a PlanRequest (field
-        stripped) — the filter applies when new_req carries the field, i.e. when
-        _run_plan is given the ReplanRequest directly.  This guard ensures the
-        filter logic itself still works correctly after the old_plan fix.
+        End-to-end: after the fix, new_plan built via the real
+        _execute_overrides() -> _run_plan(new_req, exclude_norad_ids=...)
+        path must not contain the excluded ID. This exercises the actual
+        production code path, not _run_plan() called directly.
         """
-        pools_seen = self._patch_infra(monkeypatch)
+        self._patch_infra(monkeypatch)
 
         req = ReplanRequest(
             **_BASE,
             applied_proposal={"fuel_budget_km_s": 3.5},
             exclude_norad_ids=[11111],
         )
-        # Call _run_plan directly — this is the layer where exclude_norad_ids
-        # is applied.  Same pattern as TestExcludeNoradIdsFilter._run_with_patches.
-        _run_plan(req)
+        result = _execute_overrides(req, req.applied_proposal)
 
-        # The pool captured by fake_optimize should NOT contain 11111.
-        assert pools_seen, "fake_optimize was never called — _run_plan did not run"
-        last_pool_ids = set(pools_seen[-1])
-        assert 11111 not in last_pool_ids, (
-            "11111 appeared in the pool passed to optimize_route — "
-            "the exclude_norad_ids filter in _run_plan() is broken"
+        new_ids = {d["norad_id"] for d in result["new_plan"]["route_details"]}
+        assert 11111 not in new_ids, (
+            "11111 appeared in new_plan's route_details — exclude_norad_ids "
+            "is not being applied to new_plan"
         )
 
     def test_req_unmutated_after_execute_overrides(self, monkeypatch):

@@ -633,13 +633,24 @@ def debris_removal_methods(norad_id: int):
     return response
 
 
-def _run_plan(req: PlanRequest, *, time_limit_seconds: Optional[int] = None) -> dict[str, Any]:
+def _run_plan(
+    req: PlanRequest,
+    *,
+    time_limit_seconds: Optional[int] = None,
+    exclude_norad_ids: Optional[list[int]] = None,
+) -> dict[str, Any]:
     """Execute the full plan pipeline for a PlanRequest and return the result dict.
     Shared by /plan and /replan so both endpoints stay in sync.
 
     time_limit_seconds: when set, overrides SOLVER_TIME_LIMIT_SECONDS for the
     optimize_route() call.  Used by _dry_run_plan() to pass DRY_RUN_TIME_LIMIT_SECONDS
     so feasibility checks complete in ~1s instead of the full 5s budget.
+
+    exclude_norad_ids: when set explicitly by the caller, overrides any value
+    that may be present as req.exclude_norad_ids (attribute on ReplanRequest).
+    Callers that pass a ReplanRequest directly (e.g. tests) still work unchanged
+    via the getattr fallback; _execute_overrides passes this explicitly so that
+    new_plan is filtered even though new_req is a bare PlanRequest (no field).
 
     launch_date (on req): when present, computes day_offset = (launch_date - TLE epoch)
     and applies raan_drift_deg() to start_raan_deg so the depot reflects the actual
@@ -712,8 +723,9 @@ def _run_plan(req: PlanRequest, *, time_limit_seconds: Optional[int] = None) -> 
     # themselves; exclusion only applies where bad data causes bad decisions.
     scored = [o for o in scored if o.get("epoch_age_days", 0.0) <= req.max_tle_age_days]
 
-    if getattr(req, "exclude_norad_ids", None):
-        exclude_set = set(req.exclude_norad_ids)
+    effective_exclude = exclude_norad_ids if exclude_norad_ids is not None else getattr(req, "exclude_norad_ids", None)
+    if effective_exclude:
+        exclude_set = set(effective_exclude)
         scored = [o for o in scored if o["norad_id"] not in exclude_set]
 
     # Filtering happens on `scored` (before pool selection) rather than
@@ -2083,7 +2095,7 @@ def _execute_overrides(req: PlanRequest, raw_overrides: dict) -> dict:
     new_req_data.pop("applied_proposal", None)
     new_req_data.pop("exclude_norad_ids", None)
     new_req = PlanRequest(**new_req_data)
-    new_plan = _run_plan(new_req)
+    new_plan = _run_plan(new_req, exclude_norad_ids=req.exclude_norad_ids)
 
     # ------------------------------------------------------------------ #
     # Step 5 -- diff old vs new                                           #
