@@ -31,7 +31,6 @@ export default function PlanForm({ onSubmit, onCompare, onSweep, onChange, submi
 
   const [advanced, setAdvanced] = useState({
     pool_size: '',
-    risk_penalty_scale: '',
     nets_carried: '',
     max_wait_days: '',
     removal_method_filter: '',
@@ -207,7 +206,6 @@ export default function PlanForm({ onSubmit, onCompare, onSweep, onChange, submi
     }
 
     if (advanced.pool_size) payload.pool_size = Number(advanced.pool_size)
-    if (advanced.risk_penalty_scale) payload.risk_penalty_scale = Number(advanced.risk_penalty_scale)
     if (advanced.nets_carried) payload.nets_carried = Number(advanced.nets_carried)
     if (advanced.max_wait_days) payload.max_wait_days = Number(advanced.max_wait_days)
     if (advanced.removal_method_filter) payload.removal_method_filter = advanced.removal_method_filter
@@ -263,51 +261,58 @@ export default function PlanForm({ onSubmit, onCompare, onSweep, onChange, submi
             {/* Select launch site spans full width (long dropdown) */}
             <div className="field form-grid-span">
               <span>Select launch site</span>
-              <div className="field-with-pin">
-                <select
-                  required
-                  value={siteForm.launch_site}
-                  disabled={sitesLoading}
-                  onChange={(e) => {
-                    setSiteForm((prev) => ({ ...prev, launch_site: e.target.value }))
-                    if (sitePinnedRef.current) {
-                      globeRef?.current?.removePinEntity('launch-site-pin')
-                      sitePinnedRef.current = false
-                    }
-                    onChange?.()
-                  }}
-                >
-                  {sitesLoading && <option value="">Loading sites…</option>}
-                  {siteOptions.map(([key, site]) => (
-                    <option key={key} value={key}>
-                      {site.name} — min {site.min_inclination}° incl, {site.lat}° lat
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="pin-btn"
-                  title="Pin launch site on globe"
-                  disabled={sitesLoading || !siteForm.launch_site}
-                  onClick={handlePinSite}
-                >
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
-                    <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  className="pin-btn"
-                  title="Explore launch windows"
-                  disabled={sitesLoading || !siteForm.launch_site || submitting || comparing || sweeping}
-                  onClick={handleSweep}
-                  style={{ marginLeft: 2 }}
-                >
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
-                    <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
-                  </svg>
-                </button>
-              </div>
+              <select
+                required
+                value={siteForm.launch_site}
+                disabled={sitesLoading}
+                onChange={(e) => {
+                  setSiteForm((prev) => ({ ...prev, launch_site: e.target.value }))
+                  if (sitePinnedRef.current) {
+                    globeRef?.current?.removePinEntity('launch-site-pin')
+                    sitePinnedRef.current = false
+                  }
+                  onChange?.()
+                }}
+              >
+                {sitesLoading && <option value="">Loading sites…</option>}
+                {siteOptions.map(([key, site]) => (
+                  <option key={key} value={key}>
+                    {site.name} — min {site.min_inclination}° incl, {site.lat}° lat
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Pin site + Explore launch windows — spans full width */}
+            <div className="form-grid-span" style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+              <button
+                type="button"
+                className="pin-btn pin-btn--orbit"
+                title="Pin launch site on globe"
+                disabled={sitesLoading || !siteForm.launch_site}
+                onClick={handlePinSite}
+              >
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                  <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+                </svg>
+                <span style={{ marginLeft: 4, fontSize: 10, fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Pin site
+                </span>
+              </button>
+              <button
+                type="button"
+                className="pin-btn pin-btn--orbit"
+                title="Explore launch windows"
+                disabled={sitesLoading || !siteForm.launch_site || submitting || comparing || sweeping}
+                onClick={handleSweep}
+              >
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                  <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                </svg>
+                <span style={{ marginLeft: 4, fontSize: 10, fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  {sweeping ? 'Sweeping…' : 'Explore windows'}
+                </span>
+              </button>
             </div>
 
             {/* Inclination override — single col (pairs with fuel budget) */}
@@ -416,17 +421,6 @@ export default function PlanForm({ onSubmit, onCompare, onSweep, onChange, submi
             placeholder="default: 40"
             value={advanced.pool_size}
             onChange={(e) => updateAdvanced('pool_size', e.target.value)}
-          />
-        </label>
-
-        <label className="field">
-          Risk penalty
-          <input
-            type="number"
-            step="0.01"
-            placeholder="default: 3000"
-            value={advanced.risk_penalty_scale}
-            onChange={(e) => updateAdvanced('risk_penalty_scale', e.target.value)}
           />
         </label>
 

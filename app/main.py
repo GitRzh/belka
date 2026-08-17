@@ -385,6 +385,16 @@ class ReplanRequest(PlanRequest):
             "The same per-type validation as the free-text path is applied before the plan runs."
         ),
     )
+    exclude_norad_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "NORAD IDs to exclude from the candidate pool for the NEW plan "
+            "only (old_plan is unaffected). Intended for objects already "
+            "collected before an anomaly — no verification against actual "
+            "route history is performed; this is caller-asserted state, "
+            "not system-tracked."
+        ),
+    )
 
     @model_validator(mode="after")
     def require_text_or_proposal(self) -> "ReplanRequest":
@@ -701,6 +711,10 @@ def _run_plan(req: PlanRequest, *, time_limit_seconds: Optional[int] = None) -> 
     # so users can see the full field with quality labels and decide for
     # themselves; exclusion only applies where bad data causes bad decisions.
     scored = [o for o in scored if o.get("epoch_age_days", 0.0) <= req.max_tle_age_days]
+
+    if getattr(req, "exclude_norad_ids", None):
+        exclude_set = set(req.exclude_norad_ids)
+        scored = [o for o in scored if o["norad_id"] not in exclude_set]
 
     # Filtering happens on `scored` (before pool selection) rather than
     # after, so select_candidate_pool's top-pool_size ranking is computed
@@ -1994,6 +2008,33 @@ def _execute_overrides(req: PlanRequest, raw_overrides: dict) -> dict:
             )
         overrides["removal_method_filter"] = v  # None is a valid, meaningful override (clears the filter)
 
+    if "start_inclination_deg" in raw_overrides:
+        # When inclination is supplied, altitude must also be present — a full
+        # orbit position requires both.  Inclination-only is caller error.
+        if "start_altitude_km" not in raw_overrides:
+            raise HTTPException(
+                status_code=422,
+                detail="start_altitude_km and start_inclination_deg must be provided together.",
+            )
+        alt = float(raw_overrides["start_altitude_km"])
+        incl = float(raw_overrides["start_inclination_deg"])
+        if alt <= 0:
+            raise HTTPException(status_code=422, detail="start_altitude_km must be > 0")
+        overrides["start_altitude_km"] = alt
+        overrides["start_inclination_deg"] = incl
+        # start_raan_deg is optional — falls back to existing field default (0.0)
+        # via new_req_data if not supplied.
+        if "start_raan_deg" in raw_overrides:
+            overrides["start_raan_deg"] = float(raw_overrides["start_raan_deg"])
+    elif "start_altitude_km" in raw_overrides:
+        # Altitude-only override (e.g. altitude_expand fix type): valid; no
+        # inclination required because the existing inclination is kept via
+        # new_req_data.  Validate the value itself.
+        alt = float(raw_overrides["start_altitude_km"])
+        if alt <= 0:
+            raise HTTPException(status_code=422, detail="start_altitude_km must be > 0")
+        overrides["start_altitude_km"] = alt
+
     if "launch_site" in raw_overrides:
         v = raw_overrides["launch_site"]
         if v is None:
@@ -2035,9 +2076,11 @@ def _execute_overrides(req: PlanRequest, raw_overrides: dict) -> dict:
         # values and skip re-resolution.
         new_req_data["start_altitude_km"]    = None
         new_req_data["start_inclination_deg"] = None
-    # ReplanRequest has user_request_text / applied_proposal; PlanRequest doesn't — strip them
+    # ReplanRequest has user_request_text / applied_proposal / exclude_norad_ids;
+    # PlanRequest doesn't — strip them before constructing new_req.
     new_req_data.pop("user_request_text", None)
     new_req_data.pop("applied_proposal", None)
+    new_req_data.pop("exclude_norad_ids", None)
     new_req = PlanRequest(**new_req_data)
     new_plan = _run_plan(new_req)
 
