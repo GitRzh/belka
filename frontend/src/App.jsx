@@ -1155,11 +1155,13 @@ export default function App() {
             </button>
 
             {/* Workspace tab — always clickable */}
-            <button
+            <div
               className={`dashboard-tab${activePanel === 'workspace' ? ' dashboard-tab--active' : ''}`}
               role="tab"
+              tabIndex={0}
               aria-selected={activePanel === 'workspace'}
               onClick={() => setActivePanel('workspace')}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActivePanel('workspace'); } }}
               data-testid="panel-tab-workspace"
             >
               {activeWorkspaceEntry ? (
@@ -1181,7 +1183,7 @@ export default function App() {
                   ✕
                 </button>
               )}
-            </button>
+            </div>
 
           </div>{/* end tab bar */}
 
