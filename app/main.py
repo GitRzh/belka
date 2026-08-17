@@ -733,7 +733,17 @@ def _run_plan(
     # over the already-restricted set -- otherwise a filter could silently
     # shrink the effective pool below pool_size even when plenty of
     # matching objects exist further down the risk ranking.
-    pool = select_candidate_pool(scored, pool_size=req.pool_size)
+    depot_for_pool = {
+        "altitude_km": req.start_altitude_km,
+        "inclination_deg": req.start_inclination_deg,
+        "raan_deg": effective_raan_deg,
+    }
+    pool = select_candidate_pool(
+        scored,
+        pool_size=req.pool_size,
+        depot=depot_for_pool,
+        fuel_budget_km_s=req.fuel_budget_km_s,
+    )
 
     if req.target_norad_id is not None:
         target_obj = next((o for o in scored if o["norad_id"] == req.target_norad_id), None)
@@ -777,11 +787,17 @@ def _run_plan(
     # human-readable explanation rather than a silent empty route.
     if result["visited_count"] == 0:
         min_hop = result["min_depot_hop_km_s"]
-        result["warning"] = (
-            f"No debris nodes were visited within the given constraints. "
-            f"The cheapest depot hop on this pool is ~{min_hop} km/s -- "
-            f"try raising fuel_budget_km_s above that value."
-        )
+        if min_hop is None:
+            result["warning"] = (
+                "No debris nodes were visited: no objects are reachable within "
+                "the given fuel budget. Try raising fuel_budget_km_s."
+            )
+        else:
+            result["warning"] = (
+                f"No debris nodes were visited within the given constraints. "
+                f"The cheapest depot hop on this pool is ~{min_hop} km/s -- "
+                f"try raising fuel_budget_km_s above that value."
+            )
 
     result["pool_size_used"] = len(pool)
 
@@ -2271,11 +2287,20 @@ def naive_route(
     # making the comparison unfair.  Same reasoning as the earlier RAAN/depot
     # symmetry fix.
     scored = [o for o in scored if o.get("epoch_age_days", 0.0) <= max_tle_age_days]
-    pool = select_candidate_pool(scored, pool_size=pool_size)
+    # Build the depot dict early so we can pass it into select_candidate_pool
+    # for reachability-aware pool selection -- same depot that the cost matrix
+    # and greedy walk will use below, ensuring consistency.
+    depot = {"norad_id": -1, "name": "DEPOT (spacecraft start)", "altitude_km": start_altitude_km, "inclination_deg": start_inclination_deg, "raan_deg": start_raan_deg, "risk_score": 0.0}
 
     from app.cost_matrix import build_cost_matrix
 
-    depot = {"norad_id": -1, "name": "DEPOT (spacecraft start)", "altitude_km": start_altitude_km, "inclination_deg": start_inclination_deg, "raan_deg": start_raan_deg, "risk_score": 0.0}
+    pool = select_candidate_pool(
+        scored,
+        pool_size=pool_size,
+        depot=depot,
+        fuel_budget_km_s=fuel_budget_km_s,
+    )
+
     nodes = [depot] + pool
     matrix = build_cost_matrix(nodes)
 
@@ -2341,7 +2366,10 @@ def naive_route(
     ]
 
     depot_row = matrix[0][1:]  # list of raw km/s floats, one per pool node
-    min_depot_hop_km_s: float = round(min(depot_row), 4) if depot_row else 0.0
+    # Decision 1: when pool is empty there is no reachable object at all --
+    # reporting 0.0 would read as "any hop is free", which is misleading.
+    # Use None to signal "no reachable object in pool".
+    min_depot_hop_km_s: float | None = round(min(depot_row), 4) if depot_row else None
 
     skipped_objects = [nodes[i] for i in range(1, len(nodes)) if i not in set(visited_idx)]
 
@@ -2364,10 +2392,16 @@ def naive_route(
     }
 
     if result["visited_count"] == 0:
-        result["warning"] = (
-            f"No debris nodes were visited within the given constraints. "
-            f"The cheapest depot hop on this pool is ~{min_depot_hop_km_s} km/s -- "
-            f"try raising fuel_budget_km_s above that value."
+        if min_depot_hop_km_s is None:
+            result["warning"] = (
+                "No debris nodes were visited: no objects are reachable within "
+                "the given fuel budget. Try raising fuel_budget_km_s."
+            )
+        else:
+            result["warning"] = (
+                f"No debris nodes were visited within the given constraints. "
+                f"The cheapest depot hop on this pool is ~{min_depot_hop_km_s} km/s -- "
+                f"try raising fuel_budget_km_s above that value."
         )
 
     explanation = _explain_plan(result)

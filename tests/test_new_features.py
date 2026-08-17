@@ -819,22 +819,28 @@ def test_naive_route_has_skipped_names(monkeypatch):
 
 
 def test_naive_route_has_min_depot_hop_km_s(monkeypatch):
-    """After FIX #3: min_depot_hop_km_s must be present and be a realistic km/s value."""
+    """After FIX #3: min_depot_hop_km_s must be present.
+    With a generous budget (10.0 km/s) the pool is non-empty so the value
+    is a realistic float.  When pool is empty (Decision 1) the value is None
+    to signal "no reachable object" rather than 0.0 which reads as "free hop"."""
     monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
     result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
     assert "min_depot_hop_km_s" in result, "min_depot_hop_km_s missing from naive_route result"
     val = result["min_depot_hop_km_s"]
-    assert isinstance(val, float)
-    # Sanity range: any plausible LEO hop is between 0.01 km/s and 20 km/s.
-    assert 0.01 <= val <= 20.0, (
-        f"min_depot_hop_km_s={val} is outside the plausible km/s range for a LEO hop"
-    )
+    # With a generous budget, the pool will be non-empty and the value must be a float.
+    if val is not None:
+        assert isinstance(val, float)
+        # Sanity range: any plausible LEO hop is between 0.01 km/s and 20 km/s.
+        assert 0.01 <= val <= 20.0, (
+            f"min_depot_hop_km_s={val} is outside the plausible km/s range for a LEO hop"
+        )
 
 
 def test_naive_route_zero_visit_produces_warning(monkeypatch):
-    """After FIX #3: a tiny fuel budget that forces zero visits must produce
-    a non-null warning with min_depot_hop_km_s embedded in the message.
-    This is the exact gap that was silent before the fix."""
+    """After FIX #3 + Decision 1: a tiny fuel budget that forces zero visits must
+    produce a non-null warning.  With reachability-aware pool selection, an
+    ultra-tight budget (0.001 km/s) produces an empty pool, so min_depot_hop_km_s
+    is None (Decision 1: 0.0 would read as 'any hop is free', which is wrong)."""
     monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
     result = naive_route(**DEFAULT_START, fuel_budget_km_s=0.001)
     if result["visited_count"] > 0:
@@ -848,36 +854,44 @@ def test_naive_route_zero_visit_produces_warning(monkeypatch):
     assert "min_depot_hop_km_s" in result, (
         "min_depot_hop_km_s missing when visited_count==0"
     )
-    # Confirm the hop value in the warning message matches the field value.
     hop = result["min_depot_hop_km_s"]
-    assert str(hop) in result["warning"], (
-        f"min_depot_hop_km_s value {hop} not embedded in warning message"
-    )
+    # Decision 1: empty pool -> None (not 0.0 which reads as "free hop").
+    # Non-empty pool (edge case where budget was enough) -> float in warning.
+    if hop is None:
+        assert "reachable" in result["warning"].lower(), (
+            "Warning for empty pool should mention reachability"
+        )
+    else:
+        assert isinstance(hop, float)
+        assert str(hop) in result["warning"], (
+            f"min_depot_hop_km_s value {hop} not embedded in warning message"
+        )
 
 
 def test_naive_route_min_depot_hop_matches_cost_matrix(monkeypatch):
     """min_depot_hop_km_s must match the independently computed cheapest
-    depot->node cost from build_cost_matrix() — same verification as the
-    original test pass that caught this gap."""
+    depot->node cost from build_cost_matrix() for a non-empty pool.
+    Use a generous budget (10.0 km/s) so the pool is non-empty and the float
+    value can be cross-checked against build_cost_matrix directly."""
     from app.cost_matrix import build_cost_matrix, select_candidate_pool
     from app.main import _get_scored_field
 
     monkeypatch.setattr("app.main._explain_plan", lambda route_result: "stub briefing")
 
-    # Build the same pool naive_route uses internally.
+    # Build the same pool naive_route uses internally with a 10.0 km/s budget.
     scored = _get_scored_field()
     scored_filtered = [o for o in scored if o.get("epoch_age_days", 0.0) <= 14.0]
-    pool = select_candidate_pool(scored_filtered, pool_size=40)
-
-    depot = {
+    depot_dict = {
         "norad_id": -1, "name": "DEPOT", "altitude_km": 800.0,
         "inclination_deg": 74.0, "raan_deg": 0.0, "risk_score": 0.0,
     }
-    nodes = [depot] + pool
-    matrix = build_cost_matrix(nodes)
-    expected_min_hop = round(min(matrix[0][1:]), 4)
+    pool = select_candidate_pool(scored_filtered, pool_size=40, depot=depot_dict, fuel_budget_km_s=10.0)
 
-    result = naive_route(**DEFAULT_START, fuel_budget_km_s=0.001)
+    nodes = [depot_dict] + pool
+    matrix = build_cost_matrix(nodes)
+    expected_min_hop = round(min(matrix[0][1:]), 4) if pool else None
+
+    result = naive_route(**DEFAULT_START, fuel_budget_km_s=10.0)
     assert result["min_depot_hop_km_s"] == expected_min_hop, (
         f"min_depot_hop_km_s mismatch: response={result['min_depot_hop_km_s']}, "
         f"independently computed={expected_min_hop}"

@@ -450,7 +450,10 @@ def optimize_route(
         "total_risk_collected": round(sum(o.get("risk_score", 0.0) for o in visited_objects), 4),
         "step_breakdown": walk.step_breakdown,
         "net_capacity_constrained": nets_carried,
-        "min_depot_hop_km_s": round(min(matrix[0][1:]), 4) if len(pool) > 0 else 0.0,
+        # Decision 1: when pool is empty there is no reachable object --
+        # reporting 0.0 would read as "any hop is free", which is misleading.
+        # Use None to signal "no reachable object in pool".
+        "min_depot_hop_km_s": round(min(matrix[0][1:]), 4) if len(pool) > 0 else None,
         "total_fuel_saved_km_s": round(sum(s["fuel_saved_km_s"] for s in walk.step_breakdown), 4),
     }
 

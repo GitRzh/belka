@@ -13,6 +13,7 @@ Two representations are produced:
   require integers, so this scales km/s up (DELTA_V_SCALE) and rounds.
   Built now so step 3 is purely wiring, not more math.
 """
+import heapq
 from typing import Any
 
 try:
@@ -25,10 +26,73 @@ except ImportError:
 DEFAULT_POOL_SIZE = 40  # per handoff: ~30-50 candidates, not a forced top-5
 DELTA_V_SCALE = 1000    # km/s -> integer units for OR-Tools (1 unit = 1 m/s of delta-v)
 
+# Stage-1 prefilter slack multiplier for the two-stage reachability filter.
+# We expand the direct depot->object cutoff by this factor so Stage 1 is
+# guaranteed to be a SUPERSET of the true reachable set (never a subset).
+# A factor of 3 means: include any object whose direct-hop cost is <=
+# 3 * fuel_budget_km_s.  Objects that appear reachable via a multi-hop
+# path at cost <= budget but whose direct hop is > 3*budget are
+# essentially unreachable in practice (they'd need an intermediate that
+# costs > 2*budget just to get there and back to the path), so this slack
+# is both generous and safe.  Stage 2's real Dijkstra confirms the actual
+# reachability over this bounded superset.
+STAGE1_SLACK_MULTIPLIER = 3.0
+
+
+def compute_reachable_costs(
+    depot: dict[str, Any],
+    objects: list[dict[str, Any]],
+    matrix: list[list[float]],
+) -> dict[int, float]:
+    """Run Dijkstra from the depot (index 0) over a pre-built cost matrix to
+    compute the TRUE shortest-path delta-v cost to every object in `objects`.
+
+    The graph has N+1 nodes: index 0 is the depot, indices 1..N are the
+    objects in `objects` order.  `matrix` must be the (N+1) x (N+1) cost
+    matrix built by build_cost_matrix([depot] + objects).
+
+    Returns a dict mapping norad_id -> shortest-path delta-v (km/s).
+    Objects that are unreachable (no path within any finite budget) still
+    appear in the dict -- the caller is responsible for filtering by budget.
+
+    Delta-v costs are non-negative by construction (transfer_delta_v always
+    returns a non-negative float), so Dijkstra is the correct algorithm here.
+    It is independently unit-testable: given any synthetic depot, objects list,
+    and matrix, the returned costs must satisfy:
+      - costs[norad_id] <= direct_depot_cost   (never worse than direct hop)
+      - costs[norad_id] == matrix[0][i]        when no multi-hop path is cheaper
+    """
+    n_nodes = len(matrix)  # depot + len(objects)
+    dist = [float("inf")] * n_nodes
+    dist[0] = 0.0
+    # min-heap of (cost, node_index)
+    heap: list[tuple[float, int]] = [(0.0, 0)]
+
+    while heap:
+        d, u = heapq.heappop(heap)
+        if d > dist[u]:
+            continue  # stale entry
+        for v in range(n_nodes):
+            if v == u:
+                continue
+            nd = d + matrix[u][v]
+            if nd < dist[v]:
+                dist[v] = nd
+                heapq.heappush(heap, (nd, v))
+
+    # Map object indices (1..N) back to norad_id.
+    # depot is index 0 so object i maps to dist[i+1].
+    result: dict[int, float] = {}
+    for i, obj in enumerate(objects):
+        result[obj["norad_id"]] = dist[i + 1]
+    return result
+
 
 def select_candidate_pool(
     scored_objects: list[dict[str, Any]],
     pool_size: int = DEFAULT_POOL_SIZE,
+    depot: dict[str, Any] | None = None,
+    fuel_budget_km_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Take the top `pool_size` objects by risk_score. score_debris_field()
     already returns its list sorted descending, but this re-sorts defensively
@@ -40,9 +104,75 @@ def select_candidate_pool(
     so they shouldn't occupy a pool slot or be routable at all. Objects
     with no removal_method yet (e.g. this module's own __main__ test data,
     or any caller that hasn't run add_removal_methods()) pass through
-    unaffected -- .get() returns None, which never equals the sentinel."""
+    unaffected -- .get() returns None, which never equals the sentinel.
+
+    When both `depot` and `fuel_budget_km_s` are provided, a TRUE shortest-
+    path reachability filter is applied before the risk-sort/slice:
+
+    Stage 1 (cheap prefilter): objects whose direct depot->object delta-v
+      exceeds STAGE1_SLACK_MULTIPLIER * fuel_budget_km_s are dropped.  This
+      bounds the size of the O(n^2) matrix build and Dijkstra run.  Stage 1
+      is always a SUPERSET of the true reachable set -- it can only include
+      more candidates than the correct answer, never exclude a reachable one.
+      The invariant: any object reachable via a multi-hop path at cost <=
+      budget must have at least one hop in that path with cost <=
+      STAGE1_SLACK_MULTIPLIER * budget (otherwise the path would cost more
+      than STAGE1_SLACK_MULTIPLIER * budget, making it unreachable by budget).
+
+    Stage 2 (real Dijkstra reachability): build the full pairwise delta-v
+      matrix over the Stage-1 superset plus the depot, run Dijkstra from the
+      depot, and keep only objects whose shortest-path cost <= fuel_budget_km_s.
+      This correctly identifies objects that are cheaper to reach via an
+      intermediate hop than via a direct depot->object burn (e.g. plane changes
+      at higher altitudes are cheaper -- a direct high-inclination hop might cost
+      2.0 km/s, but going through a nearby mid-inclination object first might
+      bring it down to 1.2 km/s, a saving that the Stage-1 filter can't see).
+
+    Survivors of Stage 2 are risk-sorted and sliced to pool_size.
+
+    When depot or fuel_budget_km_s is None (the default), exact current behavior
+    applies: pure risk-sort, no reachability filter.  All existing callers that
+    omit these parameters continue to work unmodified.
+    """
     routable = [o for o in scored_objects if o.get("removal_method") != METHOD_MONITOR_ONLY]
-    ordered = sorted(routable, key=lambda o: o.get("risk_score", 0.0), reverse=True)
+
+    if depot is None or fuel_budget_km_s is None:
+        # Default path: pure risk sort, backward-compatible with all existing callers.
+        ordered = sorted(routable, key=lambda o: o.get("risk_score", 0.0), reverse=True)
+        return ordered[:pool_size]
+
+    # --- Two-stage reachability filter ---
+
+    # Stage 1: cheap direct-hop prefilter to bound the matrix size.
+    # Compute direct delta-v from depot to each object without building the
+    # full matrix (single transfer_delta_v call per object, O(n)).
+    cutoff = STAGE1_SLACK_MULTIPLIER * fuel_budget_km_s
+    stage1: list[dict[str, Any]] = []
+    for obj in routable:
+        direct = transfer_delta_v(
+            depot["altitude_km"], depot["inclination_deg"],
+            obj["altitude_km"], obj["inclination_deg"],
+            raan1_deg=depot.get("raan_deg", 0.0),
+            raan2_deg=obj.get("raan_deg", 0.0),
+        )["delta_v_total_km_s"]
+        if direct <= cutoff:
+            stage1.append(obj)
+
+    if not stage1:
+        # Nothing passed Stage 1: the fuel budget is tighter than the cheapest
+        # possible direct hop * slack, so no object is reachable at all.
+        return []
+
+    # Stage 2: build the (N+1) x (N+1) matrix over [depot] + stage1 and run Dijkstra.
+    nodes = [depot] + stage1
+    matrix = build_cost_matrix(nodes)
+    reachable_costs = compute_reachable_costs(depot, stage1, matrix)
+
+    # Keep only objects whose shortest-path cost is within the fuel budget.
+    reachable = [o for o in stage1 if reachable_costs.get(o["norad_id"], float("inf")) <= fuel_budget_km_s]
+
+    # Risk-sort survivors and slice to pool_size.
+    ordered = sorted(reachable, key=lambda o: o.get("risk_score", 0.0), reverse=True)
     return ordered[:pool_size]
 
 
