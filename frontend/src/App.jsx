@@ -289,7 +289,6 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
 }
 
 // Standalone helper (must be outside component so EntryDetailView can use it)
-const DEFAULT_RISK_PENALTY_SCALE = 3000
 const DEFAULT_POOL_SIZE = 40
 function summariseParams(params) {
   if (!params) return []
@@ -302,8 +301,6 @@ function summariseParams(params) {
     if (params.start_inclination_deg != null)  pairs.push(['incl', `${params.start_inclination_deg}°`])
   }
   if (params.fuel_budget_km_s != null) pairs.push(['budget', `${params.fuel_budget_km_s} km/s`])
-  if (params.risk_penalty_scale != null && params.risk_penalty_scale !== DEFAULT_RISK_PENALTY_SCALE)
-    pairs.push(['risk×', params.risk_penalty_scale])
   if (params.pool_size != null && params.pool_size !== DEFAULT_POOL_SIZE)
     pairs.push(['pool', params.pool_size])
   if (params.weights)
