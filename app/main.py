@@ -2059,7 +2059,8 @@ def _execute_overrides(req: PlanRequest, raw_overrides: dict) -> dict:
     # Step 4 -- compute old plan (original params) and new plan (merged)  #
     # ------------------------------------------------------------------ #
     logger.debug("[replan/_execute_overrides] req.model_dump() before old_plan: %s", req.model_dump())
-    old_plan = _run_plan(req)
+    old_plan_req = req.model_copy(update={"exclude_norad_ids": []})
+    old_plan = _run_plan(old_plan_req)
     # old_plan intentionally has no "explanation" key.
     # Design rationale: old_plan is being discarded; narrating it would cost an
     # extra LLM call for a plan the user just asked to replace, with no downstream

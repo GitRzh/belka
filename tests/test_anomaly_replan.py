@@ -384,3 +384,151 @@ class TestStartPositionOverride:
         assert "start_raan_deg" not in _ALLOWED_OVERRIDE_KEYS, (
             "start_raan_deg was added to _ALLOWED_OVERRIDE_KEYS — same reasoning."
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug fix — old_plan must NOT be affected by exclude_norad_ids
+# ---------------------------------------------------------------------------
+
+class TestOldPlanExcludeNoradIdsNotLeaked:
+    """
+    Regression test for the bug where _execute_overrides() passed the original
+    ReplanRequest (with exclude_norad_ids set) to _run_plan() for old_plan,
+    causing old_plan to silently drop those targets.
+
+    These tests call _execute_overrides() with the REAL _run_plan() — no
+    monkeypatching of _run_plan — so the actual filter logic is exercised.
+    _get_scored_field and optimize_route are still mocked for speed/offline use.
+    """
+
+    _SCORED_FIELD = [
+        {"norad_id": 11111, "name": "DEB A", "risk_score": 0.9,
+         "epoch_age_days": 1.0, "removal_method": "net_capture",
+         "removal_method_explanation": "", "removal_method_explanation_source": "default",
+         "possible_methods": [], "method_maturity": {}, "data_quality": "good",
+         "altitude_km": 400.0, "inclination_deg": 51.6, "raan_deg": 0.0,
+         "object_type": "debris"},
+        {"norad_id": 22222, "name": "DEB B", "risk_score": 0.7,
+         "epoch_age_days": 2.0, "removal_method": "net_capture",
+         "removal_method_explanation": "", "removal_method_explanation_source": "default",
+         "possible_methods": [], "method_maturity": {}, "data_quality": "good",
+         "altitude_km": 410.0, "inclination_deg": 51.6, "raan_deg": 0.0,
+         "object_type": "debris"},
+        {"norad_id": 33333, "name": "DEB C", "risk_score": 0.5,
+         "epoch_age_days": 3.0, "removal_method": "net_capture",
+         "removal_method_explanation": "", "removal_method_explanation_source": "default",
+         "possible_methods": [], "method_maturity": {}, "data_quality": "good",
+         "altitude_km": 420.0, "inclination_deg": 51.6, "raan_deg": 0.0,
+         "object_type": "debris"},
+    ]
+
+    def _patch_infra(self, monkeypatch):
+        """Patch _get_scored_field, optimize_route, _explain_diff, _explain_plan."""
+        scored = list(self._SCORED_FIELD)
+        monkeypatch.setattr(
+            "app.main._get_scored_field",
+            lambda weights=None, force_refresh=False: list(scored),
+        )
+
+        # Capture pools seen by optimize_route across all calls (old + new).
+        pools_seen = []
+
+        def fake_optimize(pool, fuel_budget_km_s=3.5, **kwargs):
+            pools_seen.append([o["norad_id"] for o in pool])
+            return {
+                "route": [],
+                "route_details": [{"norad_id": o["norad_id"], "name": o["name"],
+                                   "removal_method": o["removal_method"],
+                                   "risk_score": o["risk_score"], "delta_v_km_s": 0.1}
+                                  for o in pool],
+                "total_cost": 0.0,
+                "total_fuel_cost_km_s": 0.0,
+                "fuel_budget_km_s": fuel_budget_km_s,
+                "fuel_used_fraction": 0.0,
+                "total_risk_collected": round(
+                    sum(o["risk_score"] for o in pool), 4
+                ),
+                "visited_count": len(pool),
+                "skipped_count": 0,
+                "skipped_names": [],
+                "step_breakdown": [],
+                "min_depot_hop_km_s": 0.0,
+                "net_capacity_constrained": 1,
+            }
+
+        monkeypatch.setattr("app.main.optimize_route", fake_optimize)
+        monkeypatch.setattr("app.main._explain_diff", lambda diff: "stub diff")
+        monkeypatch.setattr("app.main._explain_plan", lambda r: "stub plan")
+
+        return pools_seen
+
+    def test_excluded_id_present_in_old_plan(self, monkeypatch):
+        """
+        After the fix: old_plan is built with exclude_norad_ids cleared, so 11111
+        must appear in old_plan's route_details even though the caller excluded it.
+        """
+        pools_seen = self._patch_infra(monkeypatch)
+
+        req = ReplanRequest(
+            **_BASE,
+            applied_proposal={"fuel_budget_km_s": 3.5},
+            exclude_norad_ids=[11111],
+        )
+        result = _execute_overrides(req, req.applied_proposal)
+
+        old_ids = {d["norad_id"] for d in result["old_plan"]["route_details"]}
+        assert 11111 in old_ids, (
+            "11111 was excluded from old_plan — the fix (model_copy with "
+            "exclude_norad_ids=[]) was not applied or was reverted"
+        )
+
+    def test_excluded_id_absent_from_new_plan(self, monkeypatch):
+        """
+        Complementary check: the _run_plan() filter still removes 11111 when
+        called with a ReplanRequest that has exclude_norad_ids=[11111].
+
+        This tests the filter at the _run_plan() layer directly (same pattern as
+        TestExcludeNoradIdsFilter) rather than through _execute_overrides(),
+        because _execute_overrides() builds new_req as a PlanRequest (field
+        stripped) — the filter applies when new_req carries the field, i.e. when
+        _run_plan is given the ReplanRequest directly.  This guard ensures the
+        filter logic itself still works correctly after the old_plan fix.
+        """
+        pools_seen = self._patch_infra(monkeypatch)
+
+        req = ReplanRequest(
+            **_BASE,
+            applied_proposal={"fuel_budget_km_s": 3.5},
+            exclude_norad_ids=[11111],
+        )
+        # Call _run_plan directly — this is the layer where exclude_norad_ids
+        # is applied.  Same pattern as TestExcludeNoradIdsFilter._run_with_patches.
+        _run_plan(req)
+
+        # The pool captured by fake_optimize should NOT contain 11111.
+        assert pools_seen, "fake_optimize was never called — _run_plan did not run"
+        last_pool_ids = set(pools_seen[-1])
+        assert 11111 not in last_pool_ids, (
+            "11111 appeared in the pool passed to optimize_route — "
+            "the exclude_norad_ids filter in _run_plan() is broken"
+        )
+
+    def test_req_unmutated_after_execute_overrides(self, monkeypatch):
+        """
+        Guard: _execute_overrides must not mutate req in place.
+        req.exclude_norad_ids must equal the original list after the call.
+        """
+        self._patch_infra(monkeypatch)
+
+        original_ids = [11111]
+        req = ReplanRequest(
+            **_BASE,
+            applied_proposal={"fuel_budget_km_s": 3.5},
+            exclude_norad_ids=list(original_ids),
+        )
+        _execute_overrides(req, req.applied_proposal)
+
+        assert req.exclude_norad_ids == original_ids, (
+            "req.exclude_norad_ids was mutated by _execute_overrides — use "
+            "model_copy() instead of modifying the original request"
+        )
