@@ -1,5 +1,5 @@
 """
-Tests for the anomaly-replan additions (scoped-down Feature 5):
+Tests for the Reroute Enabler additions (scoped-down Feature 5):
 
 Change 1 — exclude_norad_ids on ReplanRequest / filter in _run_plan():
   - A NORAD ID in exclude_norad_ids is absent from new_plan's route.

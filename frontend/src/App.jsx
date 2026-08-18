@@ -82,7 +82,7 @@ function FilterDropup({ filter, onChange, onClose }) {
 
 // Render the full detail view for a single history entry.
 // Extracted so it can be used in Workspace without duplication.
-function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, replanning, onApplyProposal, globeRef, debrisField, onLegClick, onDebrisSelect }) {
+function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, onReroute, replanning, onApplyProposal, globeRef, debrisField, globePickedObject, onLegClick, onDebrisSelect }) {
   if (entry.status === 'running') {
     return <p className="history-summary" style={{ marginTop: 8 }}>Running…</p>
   }
@@ -278,8 +278,11 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
         <div className="workspace-replan" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--c-line)' }}>
           <div className="working-sticky-label" style={{ marginBottom: 8 }}>Replan</div>
           <ReplanInput
-            baseEntry={entry}
+            activePlan={activePlan}
+            debrisField={debrisField}
+            globePickedObject={globePickedObject}
             onReplan={(text) => onReplan(entry, text)}
+            onReroute={(ap) => onReroute(entry, ap)}
             submitting={replanning}
           />
         </div>
@@ -780,12 +783,44 @@ export default function App() {
     setCustomSelectionDone(true)
   }
 
-  // Dispatch replan based on entry kind
+  // Dispatch replan based on entry kind.
+  // text may be a string (Replan mode) or an applied_proposal object (Reroute mode).
   function handleWorkspaceReplan(entry, text) {
     if (entry.kind === 'mission_cost') {
       handleMissionCostReplan(entry, text)
     } else {
       handleReplan(entry, text)
+    }
+  }
+
+  // Reroute Enabler: apply a structured { start_altitude_km, start_inclination_deg,
+  // exclude_norad_ids } payload directly — no LLM text parse.
+  // start_altitude_km/start_inclination_deg go through applied_proposal (bypass LLM).
+  // exclude_norad_ids is a top-level ReplanRequest field, sent separately.
+  async function handleWorkspaceReroute(entry, appliedProposal) {
+    const { exclude_norad_ids, start_altitude_km, start_inclination_deg } = appliedProposal
+    setReplanning(true)
+    setFormError(null)
+    const id = entry.id
+    const replanParams = {
+      ...entry.params,
+      applied_proposal: { start_altitude_km, start_inclination_deg },
+      exclude_norad_ids: exclude_norad_ids ?? [],
+    }
+    setHistory(h => h.map(e => e.id === id ? { ...e, status: 'running', result: null, error: null } : e))
+    try {
+      const result = await api.replan(replanParams)
+      setPlan(result.new_plan)
+      setRouteMode('ai')
+      setNaivePlan(null)
+      const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result, kind: 'replan' } : e))
+      appendReplanTab(result.new_plan?.route)
+    } catch (err) {
+      setFormError(err.body?.detail || err.message)
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
+    } finally {
+      setReplanning(false)
     }
   }
 
@@ -1319,7 +1354,9 @@ export default function App() {
                     onEditSelection={handleEditSelection}
                     globeRef={globeRef}
                     debrisField={debrisField}
+                    globePickedObject={activeDebrisId != null ? (debrisField.find(d => d.norad_id === activeDebrisId) ?? null) : null}
                     onReplan={handleWorkspaceReplan}
+                    onReroute={handleWorkspaceReroute}
                     onApplyProposal={handleApplyProposal}
                     replanning={replanning}
                     onLegClick={handleLegClick}
