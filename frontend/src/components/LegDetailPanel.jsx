@@ -3,13 +3,15 @@ import { api } from '../api.js'
 import DataQualityBadge from './DataQualityBadge.jsx'
 
 // Props:
-//   step       — one step_breakdown entry from the plan:
-//                { from, to, delta_v_km_s, arrival_time_days, raan_drift_deg,
-//                  recommended_wait_days, fuel_saved_km_s, data_quality }
-//   fromNoradId — integer NORAD id of the FROM node (-1 for depot)
-//   toNoradId   — integer NORAD id of the TO node
-//   legIndex    — 1-based display index shown in the header title
-//   onClose()  — close this panel
+//   step              — one step_breakdown entry from the plan:
+//                       { from, to, delta_v_km_s, arrival_time_days, raan_drift_deg,
+//                         recommended_wait_days, fuel_saved_km_s, data_quality }
+//   fromNoradId       — integer NORAD id of the FROM node (-1 for depot)
+//   toNoradId         — integer NORAD id of the TO node
+//   legIndex          — 1-based display index shown in the header title
+//   onClose()         — close this panel
+//   depotAltitudeKm   — activePlan.depot.altitude_km; shown on the depot FROM card
+//   depotInclinationDeg — activePlan.depot.inclination_deg; shown on the depot FROM card
 function Row({ label, value }) {
   if (value === null || value === undefined || value === '') return null
   return (
@@ -25,7 +27,7 @@ function SectionHeading({ children }) {
 }
 
 // Single endpoint card — shown side by side in the FROM / TO columns.
-function EndpointCard({ obj, label }) {
+function EndpointCard({ obj, label, depotAltitudeKm, depotInclinationDeg }) {
   if (!obj) return null
   if (obj.is_depot) {
     return (
@@ -35,6 +37,8 @@ function EndpointCard({ obj, label }) {
         <div className="leg-panel-endpoint-norad" style={{ color: 'var(--c-steel)', fontSize: 11 }}>
           spacecraft start
         </div>
+        <Row label="Altitude" value={depotAltitudeKm != null ? `${depotAltitudeKm} km` : null} />
+        <Row label="Inclination" value={depotInclinationDeg != null ? `${depotInclinationDeg}°` : null} />
       </div>
     )
   }
@@ -60,7 +64,7 @@ function EndpointCard({ obj, label }) {
   )
 }
 
-export default function LegDetailPanel({ step, fromNoradId, toNoradId, legIndex, onClose }) {
+export default function LegDetailPanel({ step, fromNoradId, toNoradId, legIndex, onClose, depotAltitudeKm, depotInclinationDeg }) {
   const [data, setData]     = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError]   = useState(null)
@@ -115,7 +119,7 @@ export default function LegDetailPanel({ step, fromNoradId, toNoradId, legIndex,
 
         {/* ── FROM / TO cards ───────────────────────────────────────── */}
         <div className="leg-panel-endpoints">
-          <EndpointCard obj={data?.from_obj ?? (fromNoradId === -1 ? { is_depot: true } : null)} label="FROM" />
+          <EndpointCard obj={data?.from_obj ?? (fromNoradId === -1 ? { is_depot: true } : null)} label="FROM" depotAltitudeKm={depotAltitudeKm} depotInclinationDeg={depotInclinationDeg} />
           <div className="leg-panel-endpoints-arrow">→</div>
           <EndpointCard obj={data?.to_obj ?? null} label="TO" />
         </div>

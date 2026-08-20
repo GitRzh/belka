@@ -1171,6 +1171,8 @@ export default function App() {
               toNoradId={activeLeg.toNoradId}
               legIndex={activeLeg.legIndex}
               onClose={handleLegClose}
+              depotAltitudeKm={activePlan?.depot?.altitude_km}
+              depotInclinationDeg={activePlan?.depot?.inclination_deg}
             />
           )}
 
