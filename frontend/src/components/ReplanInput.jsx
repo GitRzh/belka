@@ -7,15 +7,20 @@ import { useState, useEffect, useRef } from 'react'
 //   globePickedObject — debris object most recently clicked on the globe (or null);
 //                       when this changes while Reroute mode is active, its orbit
 //                       data is copied into the altitude/inclination inputs.
+//   fuelBudgetKmS    — the base history entry's live fuel_budget_km_s (single
+//                       source of truth for both the fuel-remaining ceiling label
+//                       and the prefill math; not a separate stored/snapshot value).
 //   onReplan(text)   — called with trimmed request text (Replan mode)
 //   onReroute(ap)    — called with { start_altitude_km, start_inclination_deg,
-//                       exclude_norad_ids } (Reroute mode); App wraps into applied_proposal
+//                       exclude_norad_ids, fuel_budget_km_s? } (Reroute mode);
+//                       App wraps into applied_proposal
 //   onCancel         — called when the user cancels
 //   submitting       — bool, disables inputs while API call is in flight
 export default function ReplanInput({
   activePlan,
   debrisField,
   globePickedObject,
+  fuelBudgetKmS,
   onReplan,
   onReroute,
   onCancel,
@@ -29,6 +34,7 @@ export default function ReplanInput({
   // ── Reroute mode state ────────────────────────────────────────────────────
   const [altKm, setAltKm] = useState('')
   const [inclDeg, setInclDeg] = useState('')
+  const [fuelKm, setFuelKm] = useState('')
   const [excludedIds, setExcludedIds] = useState(new Set())
 
   // Track whether Reroute fields have been prefilled at least once so we
@@ -55,6 +61,10 @@ export default function ReplanInput({
     if (lastObj?.altitude_km != null) {
       setAltKm(String(round1(lastObj.altitude_km)))
       setInclDeg(String(round2(lastObj.inclination_deg ?? 0)))
+      if (lastObj.norad_id != null) {
+        const fuelPrefill = fuelPrefillForNoradId(lastObj.norad_id)
+        if (fuelPrefill != null) setFuelKm(String(round2(fuelPrefill)))
+      }
       prefillDoneRef.current = true
     }
   // Only fires when mode first becomes 'reroute'; routeObjects is derived
@@ -75,14 +85,43 @@ export default function ReplanInput({
     if (globePickedObject.inclination_deg != null) {
       setInclDeg(String(round2(globePickedObject.inclination_deg)))
     }
+    if (globePickedObject.norad_id != null) {
+      const fuelPrefill = fuelPrefillForNoradId(globePickedObject.norad_id)
+      if (fuelPrefill != null) setFuelKm(String(round2(fuelPrefill)))
+    }
   }, [mode, globePickedObject])
 
   function round1(v) { return Math.round(Number(v) * 10) / 10 }
   function round2(v) { return Math.round(Number(v) * 100) / 100 }
 
+  // Fuel-remaining prefill math (single source of truth, derived live — no
+  // separate stored ceiling/snapshot field, per the fuel ceiling/prefill fix):
+  //   ceiling = fuelBudgetKmS (baseEntry.params.fuel_budget_km_s, passed in as a prop)
+  //   prefill = ceiling − Σ(delta_v_km_s for legs 0..clicked-object-index)
+  // Returns null when there isn't enough data to compute a prefill (caller
+  // leaves the field as-is in that case, matching the altitude/inclination
+  // guard pattern used elsewhere in this file).
+  function fuelPrefillForNoradId(noradId) {
+    if (fuelBudgetKmS == null) return null
+    if (!activePlan?.route_details?.length) return null
+    const idx = activePlan.route_details.findIndex((d) => d.norad_id === noradId)
+    if (idx === -1) return null
+    const cumulativeDv = activePlan.route_details
+      .slice(0, idx + 1)
+      .reduce((sum, d) => sum + (Number(d.delta_v_km_s) || 0), 0)
+    const raw = fuelBudgetKmS - cumulativeDv
+    // Clamp to [0, ceiling] — this is the prefill clamp, distinct from the
+    // Q3 hard min/max=0/15 on the input itself.
+    return Math.min(fuelBudgetKmS, Math.max(0, raw))
+  }
+
   function handleSnapTo(obj) {
     if (obj.altitude_km != null) setAltKm(String(round1(obj.altitude_km)))
     if (obj.inclination_deg != null) setInclDeg(String(round2(obj.inclination_deg)))
+    if (obj.norad_id != null) {
+      const fuelPrefill = fuelPrefillForNoradId(obj.norad_id)
+      if (fuelPrefill != null) setFuelKm(String(round2(fuelPrefill)))
+    }
   }
 
   function toggleExclude(noradId) {
@@ -104,11 +143,19 @@ export default function ReplanInput({
     const alt = parseFloat(altKm)
     const incl = parseFloat(inclDeg)
     if (isNaN(alt) || isNaN(incl)) return
-    onReroute({
+    const payload = {
       start_altitude_km: alt,
       start_inclination_deg: incl,
       exclude_norad_ids: [...excludedIds],
-    })
+    }
+    // Fuel is optional — if the field isn't a valid number, omit it so the
+    // backend keeps the entry's existing budget unchanged.
+    const fuel = parseFloat(fuelKm)
+    if (!isNaN(fuel)) {
+      // Q3 hard clamp: min 0, max 15, independent of the soft ceiling label.
+      payload.fuel_budget_km_s = Math.min(15, Math.max(0, fuel))
+    }
+    onReroute(payload)
   }
 
   const sharedButtons = (
@@ -180,7 +227,7 @@ export default function ReplanInput({
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input
                 type="number"
-                min={200} max={2000} step={1}
+                min={200} max={2000} step={0.1}
                 value={altKm}
                 onChange={(e) => setAltKm(e.target.value)}
                 disabled={submitting}
@@ -188,9 +235,39 @@ export default function ReplanInput({
               />
               <input
                 type="range"
-                min={200} max={2000} step={1}
+                min={200} max={2000} step={0.1}
                 value={isNaN(parseFloat(altKm)) ? 200 : Math.min(2000, Math.max(200, parseFloat(altKm)))}
                 onChange={(e) => setAltKm(e.target.value)}
+                disabled={submitting}
+                style={{ flex: 1 }}
+              />
+            </div>
+          </label>
+
+          {/* Fuel remaining */}
+          <label className="field" style={{ marginBottom: 10 }}>
+            <span style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <span>Fuel remaining (km/s)</span>
+              {fuelBudgetKmS != null && (
+                <span style={{ fontSize: 10, color: 'var(--c-steel)', textTransform: 'none', letterSpacing: 'normal' }}>
+                  ceiling {round2(fuelBudgetKmS)} km/s
+                </span>
+              )}
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="number"
+                min={0} max={15} step={0.1}
+                value={fuelKm}
+                onChange={(e) => setFuelKm(e.target.value)}
+                disabled={submitting}
+                style={{ width: 80 }}
+              />
+              <input
+                type="range"
+                min={0} max={15} step={0.1}
+                value={isNaN(parseFloat(fuelKm)) ? 0 : Math.min(15, Math.max(0, parseFloat(fuelKm)))}
+                onChange={(e) => setFuelKm(e.target.value)}
                 disabled={submitting}
                 style={{ flex: 1 }}
               />

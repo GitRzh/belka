@@ -263,6 +263,15 @@ h1, h2, h3 {
   border-color: var(--c-steel);
 }
 
+/* ReplanInput accent color: fuel/altitude/inclination number+range pairs only.
+   Scoped by input type, not a new class — type="checkbox" (the exclude
+   checklist) is deliberately excluded, and this selector only reaches
+   ReplanInput's own .replan container, not other components' controls. */
+.replan input[type="number"],
+.replan input[type="range"] {
+  accent-color: var(--c-signal);
+}
+
 .mission-form textarea {
   min-height: 60px;
   resize: vertical;

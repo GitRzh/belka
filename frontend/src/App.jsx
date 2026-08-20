@@ -273,14 +273,18 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
         </>
       )}
 
-      {/* Replan control — always available in workspace view */}
-      {entry.status !== 'running' && onReplan && (
+      {/* Replan control — only available for the latest entry in its chain.
+          An older entry (superseded by a newer history entry) is read-only:
+          the action panel hides and the snapshot rendering above already
+          shows that entry's own result. */}
+      {isLatest && entry.status !== 'running' && onReplan && (
         <div className="workspace-replan" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--c-line)' }}>
           <div className="working-sticky-label" style={{ marginBottom: 8 }}>Replan</div>
           <ReplanInput
             activePlan={activePlan}
             debrisField={debrisField}
             globePickedObject={globePickedObject}
+            fuelBudgetKmS={entry.params?.fuel_budget_km_s}
             onReplan={(text) => onReplan(entry, text)}
             onReroute={(ap) => onReroute(entry, ap)}
             submitting={replanning}
@@ -363,9 +367,19 @@ export default function App() {
   const [history, setHistory] = useState([])
 
   // Route tab strip — always: Plan tab (index 0) + up to MAX_ROUTE_REPLAN_TABS replan tabs.
-  // Each entry: { label: string, route: string[] }
+  // Each entry: { label: string, route: string[], type: 'plan'|'replan'|'reroute'|'fix', entryId: string }
+  // entryId ties a tab back to the history entry it was generated from, so the
+  // tab strip and the History panel can stay in sync in both directions (Q1).
   const [routeTabs, setRouteTabs] = useState([])
   const [activeRouteTabIdx, setActiveRouteTabIdx] = useState(0)
+
+  // Independent per-kind labeling counters (ref-based, not derived from the
+  // last visible tab's label — that approach breaks once
+  // MAX_ROUTE_REPLAN_TABS trims old tabs off the front, which would cause
+  // renumbering/collisions across kinds).
+  const replanCounterRef = useRef(0)
+  const rerouteCounterRef = useRef(0)
+  const fixCounterRef = useRef(0)
 
   // activeWorkspaceId — id of the history entry currently open in the Workspace section.
   // null = empty/dimmed placeholder state.
@@ -439,8 +453,12 @@ export default function App() {
       setRouteMode('ai')
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', result } : e))
       // Reset route tab strip to just the Plan tab
-      setRouteTabs([{ label: 'Plan', route: result.route ?? [], type: 'plan' }])
+      setRouteTabs([{ label: 'Plan', route: result.route ?? [], type: 'plan', entryId: id }])
       setActiveRouteTabIdx(0)
+      // Reset per-kind counters for the new plan chain.
+      replanCounterRef.current = 0
+      rerouteCounterRef.current = 0
+      fixCounterRef.current = 0
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -501,8 +519,17 @@ export default function App() {
   }
 
   // Helper: append a new replan tab (drops oldest replan if over cap; Plan always stays).
-  // Returns the next tabs array so callers can compute the new active index synchronously.
-  function appendReplanTab(newRoute) {
+  // kind: 'replan' | 'reroute' | 'fix' — each has its own independent counter so
+  // trimming old tabs off the front never renumbers or collides labels across kinds.
+  // entryId: the history entry this tab's result belongs to (Q1 tab/history sync).
+  function appendReplanTab(newRoute, kind, entryId) {
+    const counterRef = kind === 'reroute' ? rerouteCounterRef
+      : kind === 'fix' ? fixCounterRef
+      : replanCounterRef
+    counterRef.current += 1
+    const label = kind === 'reroute' ? `Reroute #${counterRef.current}`
+      : kind === 'fix' ? `Fix #${counterRef.current}`
+      : `Replan #${counterRef.current}`
     setRouteTabs(prev => {
       const planTab = prev[0] ?? { label: 'Plan', route: [] }
       const replanTabs = prev.slice(1)
@@ -510,11 +537,7 @@ export default function App() {
       const trimmed = replanTabs.length >= MAX_ROUTE_REPLAN_TABS
         ? replanTabs.slice(1)
         : replanTabs
-      // Derive the next sequential replan number from the last tab's label.
-      const lastReplanNum = trimmed.length > 0
-        ? Number(trimmed[trimmed.length - 1].label.replace('Replan #', ''))
-        : 0
-      const nextTabs = [planTab, ...trimmed, { label: `Replan #${lastReplanNum + 1}`, route: newRoute ?? [], type: 'replan' }]
+      const nextTabs = [planTab, ...trimmed, { label, route: newRoute ?? [], type: kind, entryId }]
       // Schedule active-index update to point at the new last tab.
       setActiveRouteTabIdx(nextTabs.length - 1)
       return nextTabs
@@ -540,7 +563,7 @@ export default function App() {
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result } : e))
       // Append replan tab
-      appendReplanTab(result.new_plan?.route)
+      appendReplanTab(result.new_plan?.route, 'replan', id)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -798,13 +821,20 @@ export default function App() {
   // start_altitude_km/start_inclination_deg go through applied_proposal (bypass LLM).
   // exclude_norad_ids is a top-level ReplanRequest field, sent separately.
   async function handleWorkspaceReroute(entry, appliedProposal) {
-    const { exclude_norad_ids, start_altitude_km, start_inclination_deg } = appliedProposal
+    const { exclude_norad_ids, start_altitude_km, start_inclination_deg, fuel_budget_km_s } = appliedProposal
     setReplanning(true)
     setFormError(null)
     const id = entry.id
     const replanParams = {
       ...entry.params,
-      applied_proposal: { start_altitude_km, start_inclination_deg },
+      applied_proposal: {
+        start_altitude_km,
+        start_inclination_deg,
+        // Only include fuel_budget_km_s when the user actually set it in the
+        // Reroute form — omit rather than send an unparsed/empty value so
+        // the backend's existing budget carries over unchanged.
+        ...(fuel_budget_km_s != null ? { fuel_budget_km_s } : {}),
+      },
       exclude_norad_ids: exclude_norad_ids ?? [],
     }
     setHistory(h => h.map(e => e.id === id ? { ...e, status: 'running', result: null, error: null } : e))
@@ -815,7 +845,7 @@ export default function App() {
       setNaivePlan(null)
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result, kind: 'replan' } : e))
-      appendReplanTab(result.new_plan?.route)
+      appendReplanTab(result.new_plan?.route, 'reroute', id)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -853,7 +883,7 @@ export default function App() {
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result, kind: 'replan' } : e))
       // Append replan tab
-      appendReplanTab(result.new_plan?.route)
+      appendReplanTab(result.new_plan?.route, 'fix', id)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -881,12 +911,14 @@ export default function App() {
   // orange for everything else (plan tab once any replan exists, or older replan tabs).
   const routeColor = (() => {
     if (routeTabs.length === 0) return 'white'
-    const hasAnyReplan = routeTabs.some(t => t.type === 'replan')
+    // 'replan' | 'reroute' | 'fix' are all non-Plan modification kinds now
+    // (previously only 'replan' existed) — any of them counts here.
+    const hasAnyReplan = routeTabs.some(t => t.type !== 'plan')
     const activeTab = routeTabs[Math.min(activeRouteTabIdx, routeTabs.length - 1)]
     if (!hasAnyReplan) return 'white'
-    const lastReplanIdx = routeTabs.reduce((best, t, i) => t.type === 'replan' ? i : best, -1)
+    const lastReplanIdx = routeTabs.reduce((best, t, i) => t.type !== 'plan' ? i : best, -1)
     const activeIdx = Math.min(activeRouteTabIdx, routeTabs.length - 1)
-    if (activeTab.type === 'replan' && activeIdx === lastReplanIdx) return '#B4FF00'
+    if (activeTab.type !== 'plan' && activeIdx === lastReplanIdx) return '#B4FF00'
     return 'orange'
   })()
 
@@ -906,6 +938,17 @@ export default function App() {
   const latestEntry = history.length > 0 ? history[history.length - 1] : null
   const isLatestInWorkspace = activeWorkspaceEntry?.id === latestEntry?.id
   const summaryPrefilledStart = customSelectionEditEntry?.startParams ?? null
+
+  // Select a history entry from the Workspace/History panel and keep the route
+  // tab strip in sync: if a route tab was generated from this entry, activate it
+  // too (Q1 — tab strip and History panel selection are the same state, in sync
+  // both directions).
+  function selectWorkspaceEntry(entryId) {
+    setActiveWorkspaceId(entryId)
+    setActivePanel('workspace')
+    const tabIdx = routeTabs.findIndex(t => t.entryId === entryId)
+    if (tabIdx !== -1) setActiveRouteTabIdx(tabIdx)
+  }
 
   if (debrisFieldError) {
     return (
@@ -947,7 +990,11 @@ export default function App() {
                 <button
                   key={idx}
                   className={`route-tab-btn${activeRouteTabIdx === idx ? ' route-tab-btn--active' : ''}`}
-                  onClick={() => setActiveRouteTabIdx(idx)}
+                  onClick={() => {
+                    setActiveRouteTabIdx(idx)
+                    // Keep History panel selection in sync with the tab strip (Q1).
+                    if (tab.entryId != null) setActiveWorkspaceId(tab.entryId)
+                  }}
                 >
                   {tab.label}
                 </button>
@@ -1322,7 +1369,7 @@ export default function App() {
                       key={entry.id}
                       className={`history-tab${isActive ? ' history-tab--active' : ''}`}
                       data-testid={`history-tab-${n}`}
-                      onClick={() => { setActiveWorkspaceId(entry.id); setActivePanel('workspace') }}
+                      onClick={() => selectWorkspaceEntry(entry.id)}
                       title={summary || undefined}
                     >
                       <span className="history-entry-number">#{n}</span>
