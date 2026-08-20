@@ -66,14 +66,21 @@ import { api } from './api.js'
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-// A depot leg (norad_id -1, no delta-v cost) followed by three real stops,
-// each carrying its own arrival delta_v_km_s — the same shape LegDetailPanel's
-// step_breakdown/leg fixtures use elsewhere in this repo's tests.
+// route_details matches the real optimizer.py shape (optimizer.py ~line 425):
+// no depot entry, no delta_v_km_s field — just norad_id, name, and other
+// per-object metadata.  The depot is not a visited object and never appears here.
 const ROUTE_DETAILS = [
-  { norad_id: -1, name: 'Depot', delta_v_km_s: 0 },
-  { norad_id: 1001, name: 'Alpha', delta_v_km_s: 1.5 },
-  { norad_id: 1002, name: 'Bravo', delta_v_km_s: 2.25 },
-  { norad_id: 1003, name: 'Charlie', delta_v_km_s: 0.75 },
+  { norad_id: 1001, name: 'Alpha', risk_score: 0.4, arrival_time_days: 10.0, data_quality: 'fresh' },
+  { norad_id: 1002, name: 'Bravo', risk_score: 0.3, arrival_time_days: 20.0, data_quality: 'fresh' },
+  { norad_id: 1003, name: 'Charlie', risk_score: 0.5, arrival_time_days: 30.0, data_quality: 'fresh' },
+]
+
+// step_breakdown aligns with route_details by array index (same visit order):
+// step_breakdown[i] is the leg arriving at route_details[i].
+const STEP_BREAKDOWN = [
+  { from: 'Depot', to: 'Alpha (1001)', delta_v_km_s: 1.5, arrival_time_days: 10.0, raan_drift_deg: 0, recommended_wait_days: 0, fuel_saved_km_s: 0, data_quality: 'fresh' },
+  { from: 'Alpha (1001)', to: 'Bravo (1002)', delta_v_km_s: 2.25, arrival_time_days: 20.0, raan_drift_deg: 0, recommended_wait_days: 0, fuel_saved_km_s: 0, data_quality: 'fresh' },
+  { from: 'Bravo (1002)', to: 'Charlie (1003)', delta_v_km_s: 0.75, arrival_time_days: 30.0, raan_drift_deg: 0, recommended_wait_days: 0, fuel_saved_km_s: 0, data_quality: 'fresh' },
 ]
 
 const DEBRIS_FIELD = [
@@ -86,6 +93,7 @@ const FUEL_BUDGET_KM_S = 10
 
 const ACTIVE_PLAN = {
   route_details: ROUTE_DETAILS,
+  step_breakdown: STEP_BREAKDOWN,
   depot: { altitude_km: 500, inclination_deg: 51.6 },
 }
 
@@ -130,27 +138,41 @@ describe('1) Fuel prefill math', () => {
     expect(screen.getByText(/ceiling 10 km\/s/)).toBeInTheDocument()
   })
 
+  it('Match-button click on Alpha prefills ceiling minus step_breakdown[0].delta_v_km_s', async () => {
+    renderReplan()
+    await switchToReroute()
+
+    // Alpha is route_details[0] → step_breakdown[0].delta_v_km_s = 1.5
+    // prefill = 10 - 1.5 = 8.5
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Match Alpha' }))
+    })
+
+    const fuelInput = getFuelNumberInput()
+    expect(fuelInput).not.toBeNull()
+    expect(fuelInput.value).toBe('8.5')
+  })
+
   it('Match-button click on Bravo prefills ceiling minus cumulative delta-v through Bravo', async () => {
     renderReplan()
     await switchToReroute()
 
-    // Bravo is route_details index 2 (Depot=0, Alpha=1, Bravo=2).
-    // cumulative delta-v through Bravo = 0 (depot) + 1.5 (Alpha) + 2.25 (Bravo) = 3.75
-    // prefill = 10 - 3.75 = 6.25
+    // Bravo is route_details[1] → step_breakdown[0..1] = 1.5 + 2.25 = 3.75
+    // prefill = 10 - 3.75 = 6.25 → round1 → 6.3 (Math.round(62.5)/10 = 63/10)
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Match Bravo' }))
     })
 
     const fuelInput = getFuelNumberInput()
     expect(fuelInput).not.toBeNull()
-    expect(fuelInput.value).toBe('6.25')
+    expect(fuelInput.value).toBe('6.3')
   })
 
   it('Match-button click on Charlie prefills ceiling minus the FULL cumulative delta-v', async () => {
     renderReplan()
     await switchToReroute()
 
-    // cumulative through Charlie = 0 + 1.5 + 2.25 + 0.75 = 4.5
+    // Charlie is route_details[2] → step_breakdown[0..2] = 1.5 + 2.25 + 0.75 = 4.5
     // prefill = 10 - 4.5 = 5.5
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Match Charlie' }))
@@ -161,11 +183,11 @@ describe('1) Fuel prefill math', () => {
     expect(fuelInput.value).toBe('5.5')
   })
 
-  it('globe-click prefills using the same ceiling-minus-cumulative-delta-v math', async () => {
+  it('globe-click prefills using step_breakdown cumulative delta-v for the picked norad_id', async () => {
     const { rerender } = renderReplan({ globePickedObject: null })
     await switchToReroute()
 
-    // Simulate a globe click on Alpha (index 1): cumulative = 0 + 1.5 = 1.5
+    // Globe click on Alpha (route_details[0]): step_breakdown[0].delta_v_km_s = 1.5
     // prefill = 10 - 1.5 = 8.5
     await act(async () => {
       rerender(
@@ -200,11 +222,30 @@ describe('1) Fuel prefill math', () => {
     expect(fuelInput.value).toBe('0')
   })
 
+  it('fuel prefill returns null (field unchanged) when step_breakdown is absent', async () => {
+    // Matches the guard: if activePlan has no step_breakdown, fuelPrefillForNoradId
+    // returns null and the fuel field stays empty rather than showing a wrong value.
+    const planWithoutStepBreakdown = { route_details: ROUTE_DETAILS, depot: ACTIVE_PLAN.depot }
+    renderReplan({ activePlan: planWithoutStepBreakdown })
+    await switchToReroute()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo' }))
+    })
+
+    const fuelInput = getFuelNumberInput()
+    expect(fuelInput).not.toBeNull()
+    // Field stays empty — the initial mode-open prefill also returns null without
+    // step_breakdown, and the Match click also returns null, so value is ''.
+    expect(fuelInput.value).toBe('')
+  })
+
   it('submitting sends the clamped fuel value as fuel_budget_km_s in the reroute payload', async () => {
     const onReroute = vi.fn()
     renderReplan({ onReroute })
     await switchToReroute()
 
+    // Match Bravo → fuel = 10 - 3.75 = 6.25 → round1 → 6.3
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Match Bravo' }))
     })
@@ -221,7 +262,7 @@ describe('1) Fuel prefill math', () => {
 
     expect(onReroute).toHaveBeenCalledTimes(1)
     const payload = onReroute.mock.calls[0][0]
-    expect(payload.fuel_budget_km_s).toBe(6.25)
+    expect(payload.fuel_budget_km_s).toBe(6.3)
   })
 })
 

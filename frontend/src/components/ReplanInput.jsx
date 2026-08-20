@@ -60,10 +60,10 @@ export default function ReplanInput({
     const lastObj = routeObjects[routeObjects.length - 1]
     if (lastObj?.altitude_km != null) {
       setAltKm(String(round1(lastObj.altitude_km)))
-      setInclDeg(String(round2(lastObj.inclination_deg ?? 0)))
+      setInclDeg(String(round1(lastObj.inclination_deg ?? 0)))
       if (lastObj.norad_id != null) {
         const fuelPrefill = fuelPrefillForNoradId(lastObj.norad_id)
-        if (fuelPrefill != null) setFuelKm(String(round2(fuelPrefill)))
+        if (fuelPrefill != null) setFuelKm(String(round1(fuelPrefill)))
       }
       prefillDoneRef.current = true
     }
@@ -83,11 +83,11 @@ export default function ReplanInput({
       setAltKm(String(round1(globePickedObject.altitude_km)))
     }
     if (globePickedObject.inclination_deg != null) {
-      setInclDeg(String(round2(globePickedObject.inclination_deg)))
+      setInclDeg(String(round1(globePickedObject.inclination_deg)))
     }
     if (globePickedObject.norad_id != null) {
       const fuelPrefill = fuelPrefillForNoradId(globePickedObject.norad_id)
-      if (fuelPrefill != null) setFuelKm(String(round2(fuelPrefill)))
+      if (fuelPrefill != null) setFuelKm(String(round1(fuelPrefill)))
     }
   }, [mode, globePickedObject])
 
@@ -101,26 +101,37 @@ export default function ReplanInput({
   // Returns null when there isn't enough data to compute a prefill (caller
   // leaves the field as-is in that case, matching the altitude/inclination
   // guard pattern used elsewhere in this file).
+  //
+  // NOTE: route_details has no delta_v_km_s field (see optimizer.py ~line 425).
+  // The per-leg costs live in step_breakdown, which is built in the same solved
+  // visit order as route_details — so they align by array index (no depot entry
+  // appears in either array; both start at the first real visited object).
   function fuelPrefillForNoradId(noradId) {
     if (fuelBudgetKmS == null) return null
     if (!activePlan?.route_details?.length) return null
+    if (!activePlan?.step_breakdown?.length) return null
     const idx = activePlan.route_details.findIndex((d) => d.norad_id === noradId)
     if (idx === -1) return null
-    const cumulativeDv = activePlan.route_details
+    // Guard: step_breakdown must have an entry for this visit index.
+    if (idx >= activePlan.step_breakdown.length) return null
+    const cumulativeDv = activePlan.step_breakdown
       .slice(0, idx + 1)
-      .reduce((sum, d) => sum + (Number(d.delta_v_km_s) || 0), 0)
+      .reduce((sum, s) => sum + (Number(s.delta_v_km_s) || 0), 0)
     const raw = fuelBudgetKmS - cumulativeDv
-    // Clamp to [0, ceiling] — this is the prefill clamp, distinct from the
-    // Q3 hard min/max=0/15 on the input itself.
-    return Math.min(fuelBudgetKmS, Math.max(0, raw))
+    // Clamp to [0, 15] — 15 is the hard max on the number/range inputs (Q3).
+    // Using the field's own hard ceiling here avoids setting a prefill value
+    // that would immediately trigger the browser's native "must be ≤ 15" error
+    // when the remaining fuel is legitimately high (e.g. early in a long route
+    // with a large budget).
+    return Math.min(15, Math.max(0, raw))
   }
 
   function handleSnapTo(obj) {
     if (obj.altitude_km != null) setAltKm(String(round1(obj.altitude_km)))
-    if (obj.inclination_deg != null) setInclDeg(String(round2(obj.inclination_deg)))
+    if (obj.inclination_deg != null) setInclDeg(String(round1(obj.inclination_deg)))
     if (obj.norad_id != null) {
       const fuelPrefill = fuelPrefillForNoradId(obj.norad_id)
-      if (fuelPrefill != null) setFuelKm(String(round2(fuelPrefill)))
+      if (fuelPrefill != null) setFuelKm(String(round1(fuelPrefill)))
     }
   }
 
