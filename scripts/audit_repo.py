@@ -409,7 +409,19 @@ def check_shape_mismatches() -> list[dict]:
                     "key": k,
                     "note": "Backend produces this key; frontend never reads it — dead data or consumed elsewhere",
                 })
-    return findings
+
+    # Deduplicate: the same backend shape may be referenced by multiple frontend
+    # groups (e.g. both "/plan route_details[]" and "/mission-cost route_details[]"
+    # map to the same backend label), producing identical (kind, endpoint, key)
+    # triples. Keep first occurrence; preserve order.
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[dict] = []
+    for f in findings:
+        sig = (f["kind"], f["endpoint"], f["key"])
+        if sig not in seen:
+            seen.add(sig)
+            deduped.append(f)
+    return deduped
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +432,10 @@ def scan_risk_penalty_references() -> list[dict]:
     """Find every reference to risk_penalty / RISK_PENALTY_SCALE outside CHANGELOG.md."""
     findings = []
     patterns = [r"risk_penalty", r"RISK_PENALTY_SCALE", r"min_risk_penalty_scale_needed"]
+    # Exclude CHANGELOG.md (historical record) and this script itself (its own
+    # docstrings/pattern strings must contain these words to describe what it searches for).
     skip_files = {"CHANGELOG.md"}
+    skip_paths = {str(Path(__file__).resolve())}
     all_files = (
         list(Path(ROOT).rglob("*.py")) +
         list(Path(ROOT).rglob("*.jsx")) +
@@ -431,6 +446,8 @@ def scan_risk_penalty_references() -> list[dict]:
     for fpath in all_files:
         rel = str(fpath.relative_to(ROOT))
         if fpath.name in skip_files:
+            continue
+        if str(fpath.resolve()) in skip_paths:
             continue
         try:
             text = fpath.read_text(encoding="utf-8", errors="replace")
