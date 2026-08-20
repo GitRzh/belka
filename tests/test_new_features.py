@@ -452,6 +452,11 @@ def test_explanation_fallback_on_groq_failure(monkeypatch):
     removal_method_explanation_source == 'fallback', and cache that fallback
     so the dead API is not re-hit for subsequent objects with the same method."""
     main_module._REMOVAL_METHOD_EXPLANATION_CACHE.clear()
+    # _scored_field_cache was added after this test was written (commit fc7452c).
+    # Without clearing it, _get_scored_field() returns the cached result from an
+    # earlier test (source='llm') and never calls _explain_removal_method again,
+    # so the third assertion would always see 'llm' instead of 'fallback'.
+    main_module._scored_field_cache.clear()
 
     fake_request = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
 

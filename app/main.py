@@ -1767,11 +1767,25 @@ def _explain_removal_method(
 ) -> tuple[str, str]:
     """Return (explanation, source) for a removal_method recommendation.
 
-    Cached by removal_method alone: only 3 distinct values exist in
-    removal_method.py, so the cache is bounded at 3 entries and generic
-    enough to reuse across every object with the same method."""
+    source is "llm" when the Groq call succeeded, "fallback" when it failed
+    or returned nothing usable.  The explanation is cached by removal_method
+    alone: only 3 distinct values exist in removal_method.py, so the cache is
+    bounded at 3 entries and generic enough to reuse across every object with
+    the same method, never referencing a specific object or norad_id."""
     if removal_method in _REMOVAL_METHOD_EXPLANATION_CACHE:
         return _REMOVAL_METHOD_EXPLANATION_CACHE[removal_method]
+
+    # Build a deterministic fallback first so we always have something to
+    # cache even if the LLM call fails — keeps _get_scored_field() from
+    # propagating a Groq error to every /plan and /debris-field caller.
+    maturity_summary = ", ".join(
+        f"{m} ({method_maturity.get(m, 'unknown maturity')})"
+        for m in possible_methods
+    )
+    fallback = (
+        f"Recommended technique: {removal_method.replace('_', ' ')}. "
+        f"Applicable method(s): {maturity_summary}."
+    )
 
     prompt = (
         "You are a technical writer for an orbital debris removal programme. "
@@ -1792,13 +1806,29 @@ def _explain_removal_method(
         "Output only the 1-2 sentence explanation — no JSON, no markdown, no preamble."
     )
 
-    resp = _groq_client().chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-    )
-    text = (resp.choices[0].message.content or "").strip()
-    result: tuple[str, str] = (text, "llm")
+    try:
+        resp = _groq_client().chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if not text:
+            raise ValueError("empty response from LLM")
+        result: tuple[str, str] = (text, "llm")
+    except (groq_module.APIConnectionError, groq_module.RateLimitError) as exc:
+        logger.warning(
+            "[_explain_removal_method] Groq error for %r, using fallback: %s",
+            removal_method, exc,
+        )
+        result = (fallback, "fallback")
+    except Exception as exc:  # malformed response, ValueError from empty check, etc.
+        logger.warning(
+            "[_explain_removal_method] unexpected error for %r, using fallback: %s",
+            removal_method, exc,
+        )
+        result = (fallback, "fallback")
+
     _REMOVAL_METHOD_EXPLANATION_CACHE[removal_method] = result
     return result
 
