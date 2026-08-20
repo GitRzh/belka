@@ -232,6 +232,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
               {entry.result.step_breakdown?.length > 0 && (
                 <details className="mc-details" style={{ marginTop: 10 }}>
                   <summary>Flight manifest ({entry.result.step_breakdown.length} legs)</summary>
+                  <div className="manifest-table-scroll">
                   <table className="manifest-table">
                     <thead>
                       <tr>
@@ -254,6 +255,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </details>
               )}
               {onEditSelection && (
@@ -317,23 +319,91 @@ function summariseParams(params) {
   return pairs
 }
 
+// Build the one-line field summary shown in the history row.
+// For PLAN: launch site + orbit shape derived from params.
+// For REPLAN: the diff-explanation text from entry.result.explanation — this is
+//   the same object /replan returns, already consumed by the reasoning panel.
+//   No duplicate logic: we read entry.result.explanation, not re-derive it.
+// For REROUTE: fuel-ceiling change if overrides_applied has it, else excluded count.
+// For FIX: short label from the result explanation (same source as REPLAN).
+// For MISSION_COST: targets + fuel cost.
 function buildHistorySummary(entry) {
   if (entry.status === 'running') return 'Running…'
   if (entry.status === 'error') return entry.error ?? 'Failed'
+
   if (entry.status === 'done' && entry.kind === 'plan') {
-    const pct = Math.round(((entry.result.fuel_used_fraction) ?? 0) * 100)
-    return `${entry.result.visited_count} of ${entry.result.pool_size_used} targets · ${entry.result.total_fuel_cost_km_s}/${entry.result.fuel_budget_km_s} km/s (${pct}%)`
+    const p = entry.params
+    if (!p) return null
+    let site = p.launch_site ? p.launch_site.replace(/_/g, ' ') : null
+    let orbit = null
+    if (p.start_altitude_km != null) {
+      orbit = `circular ${p.start_altitude_km}km`
+    } else if (p.inclination_deg != null) {
+      orbit = `${p.inclination_deg}° incl`
+    }
+    if (site && orbit) return `${site} · ${orbit}`
+    if (site) return site
+    if (orbit) return orbit
+    return null
   }
+
   if (entry.status === 'done' && entry.kind === 'replan') {
-    const raw = entry.result.explanation ?? ''
-    return raw.length > 90 ? raw.slice(0, 89) + '…' : raw
+    // Distinguish reroute from replan from fix using the stored opKind.
+    const opKind = entry.opKind ?? 'replan'
+
+    if (opKind === 'reroute') {
+      // Reroute summary: fuel ceiling change if present, else excluded-object count.
+      const overrides = entry.result?.overrides_applied ?? {}
+      if (overrides.fuel_budget_km_s != null) {
+        const oldBudget = entry.params?.fuel_budget_km_s
+        const newBudget = overrides.fuel_budget_km_s
+        if (oldBudget != null && oldBudget !== newBudget) {
+          return `fuel ceiling ${oldBudget}→${newBudget} km/s`
+        }
+        return `fuel ceiling ${newBudget} km/s`
+      }
+      const excludeCount = entry.params?.exclude_norad_ids?.length
+      if (excludeCount > 0) return `excluded ${excludeCount} objects`
+      const raw = entry.result?.explanation ?? ''
+      return raw.length > 80 ? raw.slice(0, 79) + '…' : raw || null
+    }
+
+    if (opKind === 'fix') {
+      // Fix summary: short label from diff-explanation (same path as replan,
+      // no new derivation logic).
+      const raw = entry.result?.explanation ?? ''
+      return raw.length > 80 ? raw.slice(0, 79) + '…' : raw || null
+    }
+
+    // REPLAN: weights that changed, derived from overrides_applied, with
+    // fallback to the diff-explanation text already on entry.result.explanation.
+    const overrides = entry.result?.overrides_applied ?? {}
+    if (overrides.weights && typeof overrides.weights === 'object') {
+      const parts = Object.entries(overrides.weights).map(([k, v]) => `${k} ${v}`)
+      return `weights: ${parts.join(' / ')}`
+    }
+    // Fallback: diff-explanation text from /replan response — reuse, no duplication.
+    const raw = entry.result?.explanation ?? ''
+    return raw.length > 80 ? raw.slice(0, 79) + '…' : raw || null
   }
+
   if (entry.status === 'done' && entry.kind === 'mission_cost') {
     let s = `${entry.result.visited_count} targets · ${entry.result.total_fuel_cost_km_s} km/s`
     if (entry.result.nets_carried_required > 1) s += ` · ${entry.result.nets_carried_required} nets`
     return s
   }
   return null
+}
+
+// Format a captured ISO timestamp as a short local time string.
+function formatEntryTime(isoStr) {
+  if (!isoStr) return null
+  try {
+    const d = new Date(isoStr)
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  } catch {
+    return null
+  }
 }
 
 // Maximum number of replan tabs (not counting the pinned Plan tab).
@@ -443,7 +513,7 @@ export default function App() {
     setFormError(null)
     setNaivePlan(null)
     const id = crypto.randomUUID()
-    setHistory(h => [...h, { id, kind: 'plan', status: 'running', params: payload, result: null, error: null }].slice(-MAX_HISTORY))
+    setHistory(h => [...h, { id, kind: 'plan', opKind: 'plan', status: 'running', params: payload, result: null, error: null, timestamp: new Date().toISOString() }].slice(-MAX_HISTORY))
     // Open the new entry immediately in the Workspace and switch to workspace panel
     setActiveWorkspaceId(id)
     setActivePanel('workspace')
@@ -561,7 +631,7 @@ export default function App() {
       // effective post-replan values (e.g. fuel_budget_km_s after a budget change)
       // rather than the original pre-replan values.
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
-      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result } : e))
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'replan', params: effectiveParams, result, timestamp: e.timestamp ?? new Date().toISOString() } : e))
       // Append replan tab
       appendReplanTab(result.new_plan?.route, 'replan', id)
     } catch (err) {
@@ -781,6 +851,7 @@ export default function App() {
     setHistory(h => [...h, {
       id,
       kind: 'mission_cost',
+      opKind: 'mission_cost',
       status: 'done',
       params: buildMissionCostPayload(startParams, targetNoradIds, maxWaitDays),
       result: costResult,
@@ -788,6 +859,7 @@ export default function App() {
       targetNoradIds,
       startParams,
       maxWaitDays: maxWaitDays ?? '',
+      timestamp: new Date().toISOString(),
     }].slice(-MAX_HISTORY))
     setActiveWorkspaceId(id)
     setActivePanel('workspace')
@@ -844,7 +916,7 @@ export default function App() {
       setRouteMode('ai')
       setNaivePlan(null)
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
-      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result, kind: 'replan' } : e))
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'reroute', params: effectiveParams, result, kind: 'replan', timestamp: e.timestamp ?? new Date().toISOString() } : e))
       appendReplanTab(result.new_plan?.route, 'reroute', id)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
@@ -881,7 +953,7 @@ export default function App() {
       // effective post-replan values (e.g. fuel_budget_km_s after a budget change)
       // rather than the original pre-replan values.
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
-      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', params: effectiveParams, result, kind: 'replan' } : e))
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'fix', params: effectiveParams, result, kind: 'replan', timestamp: e.timestamp ?? new Date().toISOString() } : e))
       // Append replan tab
       appendReplanTab(result.new_plan?.route, 'fix', id)
     } catch (err) {
@@ -1235,9 +1307,12 @@ export default function App() {
               <span className="dashboard-section-title">History</span>
             </button>
 
-            {/* Workspace tab — always clickable */}
+            {/* Workspace tab — always clickable.
+                Sized to match the Generate Plan button (.btn-primary):
+                same padding (9px 14px), font-size (12px) and font-weight — see
+                .workspace-tab-sized in global.css for the exact values. */}
             <div
-              className={`dashboard-tab${activePanel === 'workspace' ? ' dashboard-tab--active' : ''}`}
+              className={`dashboard-tab workspace-tab-sized${activePanel === 'workspace' ? ' dashboard-tab--active' : ''}`}
               role="tab"
               tabIndex={0}
               aria-selected={activePanel === 'workspace'}
@@ -1256,7 +1331,7 @@ export default function App() {
               )}
               {activeWorkspaceEntry && (
                 <button
-                  className="btn workspace-close-btn"
+                  className="workspace-close-btn"
                   data-testid="workspace-close-btn"
                   aria-label="Clear workspace"
                   onClick={(e) => { e.stopPropagation(); setActiveWorkspaceId(null) }}
@@ -1366,23 +1441,39 @@ export default function App() {
                   const n = getEntryNumber(entry.id)
                   const isActive = activeWorkspaceId === entry.id
                   const summary = buildHistorySummary(entry)
+                  const timeStr = formatEntryTime(entry.timestamp)
+                  // Derive the display label from opKind (stored per-entry) so
+                  // reroute and fix entries show their real type, not just 'Mod'.
+                  const kindLabel = {
+                    plan: 'Plan',
+                    replan: 'Replan',
+                    reroute: 'Reroute',
+                    fix: 'Fix',
+                    mission_cost: 'Custom',
+                  }[entry.opKind ?? entry.kind] ?? 'Mod'
                   return (
                     <button
                       key={entry.id}
                       className={`history-tab${isActive ? ' history-tab--active' : ''}`}
                       data-testid={`history-tab-${n}`}
                       onClick={() => selectWorkspaceEntry(entry.id)}
-                      title={summary || undefined}
                     >
                       <span className="history-entry-number">#{n}</span>
-                      <span className="history-tab-kind">
-                        {entry.kind === 'plan' ? 'Plan'
-                          : entry.kind === 'mission_cost' ? 'Custom'
-                          : 'Mod'}
+                      <span className={`history-tab-kind${isActive ? ' history-tab-kind--active' : ''}`}>
+                        {kindLabel}
                       </span>
-                      <span className={`history-tab-status${entry.status === 'error' ? ' history-tab-status--error' : entry.status === 'running' ? ' history-tab-status--running' : ''}`}>
-                        {entry.status === 'running' ? '…' : entry.status === 'done' ? 'Done' : 'Fail'}
-                      </span>
+                      {entry.status === 'error' && (
+                        <span className="history-tab-status history-tab-status--error">Fail</span>
+                      )}
+                      {entry.status === 'running' && (
+                        <span className="history-tab-status history-tab-status--running">…</span>
+                      )}
+                      {summary && entry.status !== 'running' && (
+                        <span className="history-tab-summary">{summary}</span>
+                      )}
+                      {timeStr && (
+                        <span className="history-tab-time">{timeStr} UTC</span>
+                      )}
                     </button>
                   )
                 })}

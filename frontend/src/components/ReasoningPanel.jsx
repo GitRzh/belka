@@ -81,6 +81,7 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
       {plan.step_breakdown?.length > 0 && (
         <details>
           <summary>Flight manifest ({plan.step_breakdown.length} legs)</summary>
+          <div className="manifest-table-scroll">
           <table className="manifest-table">
             <thead>
               <tr>
@@ -168,6 +169,7 @@ export default function ReasoningPanel({ plan, explanationOverride, proposals, o
               })}
             </tbody>
           </table>
+          </div>
         </details>
       )}
       {/* Proposal buttons — only rendered when visited_count == 0 AND the

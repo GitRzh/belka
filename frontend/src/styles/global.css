@@ -370,6 +370,9 @@ h1, h2, h3 {
   margin: 0;
   font-family: var(--font-mono);
   text-align: right;
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .reasoning details {
@@ -385,8 +388,14 @@ h1, h2, h3 {
   letter-spacing: 0.06em;
 }
 
-.manifest-table {
+/* Manifest table scroll wrapper — table has 8 columns and can exceed panel width */
+.reasoning details .manifest-table-scroll {
+  overflow-x: auto;
   width: 100%;
+}
+
+.manifest-table {
+  min-width: 560px; /* enough for all 8 columns; scrolls horizontally when panel is narrow */
   border-collapse: collapse;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -702,9 +711,15 @@ h1, h2, h3 {
   background: transparent;
 }
 
-/* Active tab — no fill; distinguish with title color only */
+/* Active tab — lighter border + subtle fill + white title (same highlight as
+   history-tab--active so the same visual language applies to both). */
+.dashboard-tab--active {
+  border-bottom: 2px solid var(--c-ink);
+  background: var(--c-panel-raised);
+}
 .dashboard-tab--active .dashboard-section-title {
   color: var(--c-ink);
+  font-weight: 600;
 }
 
 /* Disabled tab (Workspace before any plans) */
@@ -717,6 +732,7 @@ h1, h2, h3 {
 /* ── Content pane ─────────────────────────────────────────────────── */
 .dashboard-pane {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -737,16 +753,42 @@ h1, h2, h3 {
   opacity: 0.45;
 }
 
+/* Workspace tab — sized to match the Generate Plan button (.btn.btn-primary):
+   font-size: 12px, padding: 9px 14px, font-weight 600. Intentionally larger
+   than PARAMETERS/HISTORY tabs, per spec. */
+.workspace-tab-sized {
+  padding: 9px 14px;
+}
+.workspace-tab-sized .dashboard-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
 .workspace-close-btn {
-  font-size: 11px;
-  padding: 3px 7px;
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 12px;
+  background: transparent;
   color: var(--c-steel);
+  border: none;
+  border-radius: var(--radius);
+  padding: 0 0 0 6px;
+  cursor: pointer;
+  line-height: 1;
+}
+.workspace-close-btn:hover {
+  color: var(--c-ink);
 }
 
 .dashboard-section-body {
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 14px;
   flex: 1;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -774,24 +816,28 @@ h1, h2, h3 {
   padding: 2px 4px;
 }
 
+/* Single-row history entry:
+   [#N] [KIND] [summary ···············] [timestamp UTC]
+   Number badge + bold kind label + muted summary fills middle + timestamp right. */
 .history-tab {
   display: flex;
+  flex-direction: row;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   width: 100%;
   text-align: left;
   background: transparent;
   border: 1px solid var(--c-line);
   border-radius: var(--radius);
-  padding: 5px 8px;
+  padding: 7px 10px;
   cursor: pointer;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--c-ink);
-  white-space: nowrap;
   overflow: hidden;
   transition: border-color 0.12s ease, background 0.12s ease;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .history-tab:hover {
@@ -799,6 +845,7 @@ h1, h2, h3 {
   background: var(--c-panel-raised);
 }
 
+/* Active/selected row: lighter border + subtle fill + bold white type label */
 .history-tab--active {
   border-color: var(--c-ink);
   background: var(--c-panel-raised);
@@ -806,20 +853,48 @@ h1, h2, h3 {
 
 .history-tab-kind {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--c-steel);
   flex-shrink: 0;
 }
 
+/* Active state: kind label becomes white */
+.history-tab-kind--active {
+  color: var(--c-ink);
+}
+
+/* Summary: fills remaining space, truncates with ellipsis */
+.history-tab-summary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Timestamp: right-aligned, fixed width, muted */
+.history-tab-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--c-steel);
+  opacity: 0.7;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* Error/running inline status indicators (no DONE/LATEST) */
 .history-tab-status {
   font-family: var(--font-mono);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--c-steel);
-  margin-left: auto;
   flex-shrink: 0;
 }
 
@@ -2001,6 +2076,12 @@ h1, h2, h3 {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+/* Inside endpoint cards the label column must be much narrower than the
+   global 130px to fit in the half-width card without wrapping the value. */
+.leg-panel-endpoint-card .debris-modal-row {
+  grid-template-columns: auto 1fr;
 }
 
 .leg-panel-endpoint-label {
