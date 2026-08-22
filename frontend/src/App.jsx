@@ -82,7 +82,7 @@ function FilterDropup({ filter, onChange, onClose }) {
 
 // Render the full detail view for a single history entry.
 // Extracted so it can be used in Workspace without duplication.
-function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onToggleNaive, onEditSelection, onReplan, onReroute, replanning, onApplyProposal, globeRef, debrisField, globePickedObject, onLegClick, onDebrisSelect }) {
+function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onSelectAI, onSelectNaive, onEditSelection, onReplan, onReroute, replanning, onApplyProposal, globeRef, debrisField, globePickedObject, onLegClick, onDebrisSelect, tabResult }) {
   if (entry.status === 'running') {
     return <p className="history-summary" style={{ marginTop: 8 }}>Running…</p>
   }
@@ -117,39 +117,57 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
         </dl>
       )}
 
-      {/* Live AI/Naive toggle for latest plan/replan entry */}
-      {isLatest && entry.status === 'done' && entry.kind !== 'mission_cost' ? (
-        <div className="history-live-result">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <span className="working-sticky-label">
-              {routeMode === 'naive' ? 'Nearest-neighbour route' : 'AI-optimised route'}
-            </span>
-            <button className="btn btn-toggle" onClick={onToggleNaive} style={{ fontSize: 11, padding: '4px 10px' }}>
-              {routeMode === 'ai' ? 'AI Route' : 'Naive Route'}
-            </button>
-          </div>
-          <ReasoningPanel
-            plan={activePlan}
-            explanationOverride={
-              routeMode === 'naive'
-                ? 'Nearest-neighbor baseline (no AI optimization)'
-                : undefined
-            }
-            proposals={activePlan?.proposals}
-            onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
-            submitting={replanning}
-            globeRef={globeRef}
-            debrisField={debrisField}
-            onLegClick={onLegClick}
-            onDebrisSelect={onDebrisSelect}
-          />
+      {/* AI / Naive two-button selector — shown for plan/replan entries (not mission_cost) */}
+      {entry.status === 'done' && entry.kind !== 'mission_cost' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <span className="working-sticky-label" style={{ flex: 1 }}>
+            {routeMode === 'naive' ? 'Nearest-neighbour route' : 'AI-optimised route'}
+          </span>
+          <button
+            className={`btn btn-toggle${routeMode === 'ai' ? ' btn-primary' : ''}`}
+            style={{ fontSize: 11, padding: '4px 10px' }}
+            onClick={isLatest ? onSelectAI : undefined}
+            disabled={!isLatest && routeMode !== 'ai'}
+          >
+            AI
+          </button>
+          <button
+            className={`btn btn-toggle${routeMode === 'naive' ? ' btn-primary' : ''}`}
+            style={{ fontSize: 11, padding: '4px 10px' }}
+            onClick={isLatest ? onSelectNaive : undefined}
+            disabled={!isLatest}
+            title={!isLatest ? 'Naive route not available for older entries' : undefined}
+          >
+            Naive
+          </button>
         </div>
-      ) : (
+      )}
+
+      {/* Route result — uses tabResult snapshot when available (non-latest tabs), else entry.result */}
+      {entry.status === 'done' && (
         <>
-          {entry.status === 'done' && entry.kind === 'plan' && (
+          {entry.kind === 'plan' && isLatest ? (
+            <div className="history-live-result">
+              <ReasoningPanel
+                plan={activePlan}
+                explanationOverride={
+                  routeMode === 'naive'
+                    ? 'Nearest-neighbor baseline (no AI optimization)'
+                    : undefined
+                }
+                proposals={activePlan?.proposals}
+                onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
+                submitting={replanning}
+                globeRef={globeRef}
+                debrisField={debrisField}
+                onLegClick={onLegClick}
+                onDebrisSelect={onDebrisSelect}
+              />
+            </div>
+          ) : entry.kind === 'plan' ? (
             <ReasoningPanel
-              plan={entry.result}
-              proposals={entry.result?.proposals}
+              plan={tabResult ?? entry.result}
+              proposals={(tabResult ?? entry.result)?.proposals}
               onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
               submitting={replanning}
               globeRef={globeRef}
@@ -157,38 +175,60 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
               onLegClick={onLegClick}
               onDebrisSelect={onDebrisSelect}
             />
-          )}
-          {entry.status === 'done' && entry.kind === 'replan' && (
-            <div className="replan-result">
-              {entry.result.explanation && (
-                <p className="explanation">{entry.result.explanation}</p>
-              )}
-              {entry.result.overrides_applied && Object.keys(entry.result.overrides_applied).length > 0 && (
-                <div className="overrides">
-                  Overrides applied:{' '}
-                  {Object.entries(entry.result.overrides_applied)
-                    .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
-                    .join(', ')}
-                </div>
-              )}
-              {entry.result.diff && (
-                <dl>
-                  {entry.result.diff.added?.length > 0 && (
-                    <><dt>Added stops</dt><dd>{entry.result.diff.added.join(', ')}</dd></>
-                  )}
-                  {entry.result.diff.dropped?.length > 0 && (
-                    <><dt>Dropped stops</dt><dd>{entry.result.diff.dropped.join(', ')}</dd></>
-                  )}
-                  <dt>Fuel Δ</dt>
-                  <dd>{entry.result.diff.fuel_delta_km_s > 0 ? '+' : ''}{entry.result.diff.fuel_delta_km_s} km/s</dd>
-                  <dt>Risk Δ</dt>
-                  <dd>{entry.result.diff.risk_delta > 0 ? '+' : ''}{entry.result.diff.risk_delta}</dd>
-                </dl>
-              )}
-              <ReasoningPanel plan={entry.result.new_plan} globeRef={globeRef} debrisField={debrisField} onLegClick={onLegClick} onDebrisSelect={onDebrisSelect} />
+          ) : entry.kind === 'replan' && isLatest ? (
+            <div className="history-live-result">
+              <ReasoningPanel
+                plan={activePlan}
+                explanationOverride={
+                  routeMode === 'naive'
+                    ? 'Nearest-neighbor baseline (no AI optimization)'
+                    : undefined
+                }
+                proposals={activePlan?.proposals}
+                onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
+                submitting={replanning}
+                globeRef={globeRef}
+                debrisField={debrisField}
+                onLegClick={onLegClick}
+                onDebrisSelect={onDebrisSelect}
+              />
             </div>
-          )}
-          {entry.status === 'done' && entry.kind === 'mission_cost' && (
+          ) : entry.kind === 'replan' ? (() => {
+            const displayResult = tabResult ?? entry.result
+            return (
+              <div className="replan-result">
+                {displayResult.explanation && (
+                  <p className="explanation">{displayResult.explanation}</p>
+                )}
+                {displayResult.overrides_applied && Object.keys(displayResult.overrides_applied).length > 0 && (
+                  <div className="overrides">
+                    Overrides applied:{' '}
+                    {Object.entries(displayResult.overrides_applied)
+                      .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
+                      .join(', ')}
+                  </div>
+                )}
+                {displayResult.diff && (
+                  <dl>
+                    {displayResult.diff.added?.length > 0 && (
+                      <><dt>Added stops</dt><dd>{displayResult.diff.added.join(', ')}</dd></>
+                    )}
+                    {displayResult.diff.dropped?.length > 0 && (
+                      <><dt>Dropped stops</dt><dd>{displayResult.diff.dropped.join(', ')}</dd></>
+                    )}
+                    <dt>Fuel Δ</dt>
+                    <dd>{displayResult.diff.fuel_delta_km_s > 0 ? '+' : ''}{displayResult.diff.fuel_delta_km_s} km/s</dd>
+                    <dt>Risk Δ</dt>
+                    <dd>{displayResult.diff.risk_delta > 0 ? '+' : ''}{displayResult.diff.risk_delta}</dd>
+                  </dl>
+                )}
+                <ReasoningPanel plan={displayResult.new_plan} globeRef={globeRef} debrisField={debrisField} onLegClick={onLegClick} onDebrisSelect={onDebrisSelect} />
+              </div>
+            )
+          })() : null}
+          {entry.kind === 'mission_cost' && (() => {
+            const mcResult = tabResult ?? entry.result
+            return (
             <div className="mc-history-result">
               {entry.overridesApplied && Object.keys(entry.overridesApplied).length > 0 && (
                 <div className="mc-overrides-applied">
@@ -198,40 +238,40 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                     .join(', ')}
                 </div>
               )}
-              {entry.result.warning && (
+              {mcResult.warning && (
                 <div className="mc-warning" role="alert">
-                  {entry.result.warning}
+                  {mcResult.warning}
                 </div>
               )}
-              {entry.result.explanation && (
+              {mcResult.explanation && (
                 <p className="explanation" style={{ marginBottom: 8 }}>
-                  {entry.result.explanation}
+                  {mcResult.explanation}
                 </p>
               )}
-              {entry.result.explanation_error && (
+              {mcResult.explanation_error && (
                 <p style={{ marginBottom: 8, color: 'var(--color-muted, #57606a)', fontSize: 12 }}>
-                  {entry.result.explanation_error}
+                  {mcResult.explanation_error}
                 </p>
               )}
               <dl className="mc-stats">
                 <dt>Targets</dt>
-                <dd>{entry.result.visited_count}</dd>
+                <dd>{mcResult.visited_count}</dd>
                 <dt>Fuel required</dt>
-                <dd>{entry.result.total_fuel_cost_km_s} km/s</dd>
-                {entry.result.total_fuel_saved_km_s > 0 && (
+                <dd>{mcResult.total_fuel_cost_km_s} km/s</dd>
+                {mcResult.total_fuel_saved_km_s > 0 && (
                   <>
                     <dt>Fuel saved by waiting</dt>
-                    <dd>{entry.result.total_fuel_saved_km_s} km/s</dd>
+                    <dd>{mcResult.total_fuel_saved_km_s} km/s</dd>
                   </>
                 )}
                 <dt>Risk collected</dt>
-                <dd>{entry.result.total_risk_collected}</dd>
+                <dd>{mcResult.total_risk_collected}</dd>
                 <dt>Nets required</dt>
-                <dd>{entry.result.nets_carried_required}</dd>
+                <dd>{mcResult.nets_carried_required}</dd>
               </dl>
-              {entry.result.step_breakdown?.length > 0 && (
+              {mcResult.step_breakdown?.length > 0 && (
                 <details className="mc-details" style={{ marginTop: 10 }}>
-                  <summary>Flight manifest ({entry.result.step_breakdown.length} legs)</summary>
+                  <summary>Flight manifest ({mcResult.step_breakdown.length} legs)</summary>
                   <div className="manifest-table-scroll">
                   <table className="manifest-table">
                     <thead>
@@ -242,7 +282,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                       </tr>
                     </thead>
                     <tbody>
-                      {entry.result.step_breakdown.map((step, i) => (
+                      {mcResult.step_breakdown.map((step, i) => (
                         <tr key={i}>
                           <td className="leg-index">{String(i + 1).padStart(2, '0')}</td>
                           <td>{step.from}</td>
@@ -268,7 +308,8 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                 </button>
               )}
             </div>
-          )}
+            )
+          })()}
           {entry.status === 'error' && (
             <p className="history-error">{entry.error}</p>
           )}
@@ -437,9 +478,10 @@ export default function App() {
   const [history, setHistory] = useState([])
 
   // Route tab strip — always: Plan tab (index 0) + up to MAX_ROUTE_REPLAN_TABS replan tabs.
-  // Each entry: { label: string, route: string[], type: 'plan'|'replan'|'reroute'|'fix', entryId: string }
+  // Each entry: { label: string, route: string[], type: 'plan'|'replan'|'reroute'|'fix'|'mission_cost', entryId: string, result: object }
   // entryId ties a tab back to the history entry it was generated from, so the
   // tab strip and the History panel can stay in sync in both directions (Q1).
+  // result: full API response snapshot for this tab — used to render per-tab Workspace content.
   const [routeTabs, setRouteTabs] = useState([])
   const [activeRouteTabIdx, setActiveRouteTabIdx] = useState(0)
 
@@ -522,8 +564,8 @@ export default function App() {
       setPlan(result)
       setRouteMode('ai')
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', result } : e))
-      // Reset route tab strip to just the Plan tab
-      setRouteTabs([{ label: 'Plan', route: result.route ?? [], type: 'plan', entryId: id }])
+      // Reset route tab strip to just the Plan tab (with full result snapshot)
+      setRouteTabs([{ label: 'Plan', route: result.route ?? [], type: 'plan', entryId: id, result }])
       setActiveRouteTabIdx(0)
       // Reset per-kind counters for the new plan chain.
       replanCounterRef.current = 0
@@ -588,17 +630,19 @@ export default function App() {
     setSweepLaunchDateToApply({ date: dateStr, seq: sweepLaunchDateSeqRef.current })
   }
 
-  // Helper: append a new replan tab (drops oldest replan if over cap; Plan always stays).
-  // kind: 'replan' | 'reroute' | 'fix' — each has its own independent counter so
-  // trimming old tabs off the front never renumbers or collides labels across kinds.
-  // entryId: the history entry this tab's result belongs to (Q1 tab/history sync).
-  function appendReplanTab(newRoute, kind, entryId) {
+  // Helper: append a new replan/reroute/fix/mission_cost tab (drops oldest replan if over cap;
+  // Plan/first tab always stays). Stores the full result snapshot so clicking an older tab
+  // restores that tab's own Workspace content, not the latest.
+  // kind: 'replan' | 'reroute' | 'fix' | 'mission_cost'
+  // result: full API response for this tab (snapshot)
+  function appendReplanTab(newRoute, kind, entryId, result) {
     const counterRef = kind === 'reroute' ? rerouteCounterRef
       : kind === 'fix' ? fixCounterRef
       : replanCounterRef
     counterRef.current += 1
     const label = kind === 'reroute' ? `Reroute #${counterRef.current}`
       : kind === 'fix' ? `Fix #${counterRef.current}`
+      : kind === 'mission_cost' ? `Custom #${counterRef.current}`
       : `Replan #${counterRef.current}`
     setRouteTabs(prev => {
       const planTab = prev[0] ?? { label: 'Plan', route: [] }
@@ -607,7 +651,7 @@ export default function App() {
       const trimmed = replanTabs.length >= MAX_ROUTE_REPLAN_TABS
         ? replanTabs.slice(1)
         : replanTabs
-      const nextTabs = [planTab, ...trimmed, { label, route: newRoute ?? [], type: kind, entryId }]
+      const nextTabs = [planTab, ...trimmed, { label, route: newRoute ?? [], type: kind, entryId, result: result ?? null }]
       // Schedule active-index update to point at the new last tab.
       setActiveRouteTabIdx(nextTabs.length - 1)
       return nextTabs
@@ -632,8 +676,8 @@ export default function App() {
       // rather than the original pre-replan values.
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'replan', params: effectiveParams, result, timestamp: e.timestamp ?? new Date().toISOString() } : e))
-      // Append replan tab
-      appendReplanTab(result.new_plan?.route, 'replan', id)
+      // Append replan tab with full result snapshot
+      appendReplanTab(result.new_plan?.route, 'replan', id, result)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -642,7 +686,7 @@ export default function App() {
     }
   }
 
-  // Replan for a mission_cost entry: overwrites the same entry in-place.
+  // Replan for a mission_cost entry: overwrites the same entry in-place and appends a tab.
   async function handleMissionCostReplan(baseEntry, userRequestText) {
     setReplanning(true)
     setFormError(null)
@@ -686,6 +730,8 @@ export default function App() {
         startParams: newStartParams,
         overridesApplied: startOverrides,
       } : e))
+      // Append tab with the new costResult snapshot (mission_cost uses replanCounterRef)
+      appendReplanTab(costResult.route ?? [], 'mission_cost', id, costResult)
     } catch (err) {
       setHistory(h => h.map(e => e.id === id ? {
         ...e, status: 'error', error: err.body?.detail || err.message,
@@ -734,23 +780,25 @@ export default function App() {
     return merged
   }
 
-  async function handleToggleNaive() {
-    if (routeMode === 'ai') {
-      if (!naivePlan) {
-        const latestDone = [...history].reverse().find(e => e.status === 'done')
-        if (!latestDone) return
-        try {
-          const result = await api.getNaiveRoute(latestDone.params)
-          setNaivePlan(result)
-        } catch (err) {
-          setFormError(err.message)
-          return
-        }
+  // handleSelectAI / handleSelectNaive replace the old single toggle.
+  // Only callable on the latest entry; behavior is identical to the prior toggle logic.
+  function handleSelectAI() {
+    setRouteMode('ai')
+  }
+
+  async function handleSelectNaive() {
+    if (!naivePlan) {
+      const latestDone = [...history].reverse().find(e => e.status === 'done')
+      if (!latestDone) return
+      try {
+        const result = await api.getNaiveRoute(latestDone.params)
+        setNaivePlan(result)
+      } catch (err) {
+        setFormError(err.message)
+        return
       }
-      setRouteMode('naive')
-    } else {
-      setRouteMode('ai')
     }
+    setRouteMode('naive')
   }
 
   const activePlan = routeMode === 'ai' ? plan : naivePlan
@@ -863,6 +911,13 @@ export default function App() {
     }].slice(-MAX_HISTORY))
     setActiveWorkspaceId(id)
     setActivePanel('workspace')
+    // Initialize tab strip for this mission_cost entry (Plan tab = the initial result)
+    setRouteTabs([{ label: 'Plan', route: costResult.route ?? [], type: 'mission_cost', entryId: id, result: costResult }])
+    setActiveRouteTabIdx(0)
+    // Reset per-kind counters for the new chain
+    replanCounterRef.current = 0
+    rerouteCounterRef.current = 0
+    fixCounterRef.current = 0
     setCustomSelectionDone(false)
     setCustomSelecting(false)
     setCustomSelectedIds(new Set())
@@ -917,7 +972,7 @@ export default function App() {
       setNaivePlan(null)
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'reroute', params: effectiveParams, result, kind: 'replan', timestamp: e.timestamp ?? new Date().toISOString() } : e))
-      appendReplanTab(result.new_plan?.route, 'reroute', id)
+      appendReplanTab(result.new_plan?.route, 'reroute', id, result)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -954,8 +1009,8 @@ export default function App() {
       // rather than the original pre-replan values.
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'fix', params: effectiveParams, result, kind: 'replan', timestamp: e.timestamp ?? new Date().toISOString() } : e))
-      // Append replan tab
-      appendReplanTab(result.new_plan?.route, 'fix', id)
+      // Append fix tab with full result snapshot
+      appendReplanTab(result.new_plan?.route, 'fix', id, result)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -1008,18 +1063,32 @@ export default function App() {
 
   const activeWorkspaceEntry = activeWorkspaceId ? history.find(e => e.id === activeWorkspaceId) : null
   const latestEntry = history.length > 0 ? history[history.length - 1] : null
-  const isLatestInWorkspace = activeWorkspaceEntry?.id === latestEntry?.id
   const summaryPrefilledStart = customSelectionEditEntry?.startParams ?? null
 
+  // The active tab's result snapshot — used to render per-tab Workspace content for non-latest tabs.
+  // When the active tab belongs to the currently shown workspace entry, pass its stored result.
+  const activeTab = routeTabs.length > 0 ? routeTabs[Math.min(activeRouteTabIdx, routeTabs.length - 1)] : null
+  const activeTabResult = (activeTab && activeTab.entryId === activeWorkspaceId) ? activeTab.result : null
+
+  // isLatestInWorkspace: true only when both (a) the workspace entry is the latest overall
+  // AND (b) the active tab is the last tab in the strip (so "Plan" tab in a replanned chain
+  // still falls through to the snapshot path and shows the Plan tab's own saved result,
+  // not activePlan which holds the most recent replan's plan).
+  const isLastTab = routeTabs.length === 0 || activeRouteTabIdx >= routeTabs.length - 1
+  const isLatestInWorkspace = activeWorkspaceEntry?.id === latestEntry?.id && isLastTab
+
   // Select a history entry from the Workspace/History panel and keep the route
-  // tab strip in sync: if a route tab was generated from this entry, activate it
-  // too (Q1 — tab strip and History panel selection are the same state, in sync
-  // both directions).
+  // tab strip in sync: default to the LAST tab in this entry's chain so the user
+  // sees the most recent result when they click the history row.
   function selectWorkspaceEntry(entryId) {
     setActiveWorkspaceId(entryId)
     setActivePanel('workspace')
-    const tabIdx = routeTabs.findIndex(t => t.entryId === entryId)
-    if (tabIdx !== -1) setActiveRouteTabIdx(tabIdx)
+    // Find the last tab belonging to this entry (latest result in the chain).
+    let lastTabIdx = -1
+    for (let i = routeTabs.length - 1; i >= 0; i--) {
+      if (routeTabs[i].entryId === entryId) { lastTabIdx = i; break }
+    }
+    if (lastTabIdx !== -1) setActiveRouteTabIdx(lastTabIdx)
   }
 
   if (debrisFieldError) {
@@ -1049,10 +1118,9 @@ export default function App() {
         {/* ── LEFT: Globe pane (50%) ──────────────────────────────────── */}
         <div className="globe-pane reticle" style={{ position: 'relative' }}>
 
-          {/* Route tab strip — shown once a plan exists.
-              When the "Clear All" button is also visible (2+ pinned objects),
-              push the strip down one row to avoid overlapping it. */}
-          {routeTabs.length > 0 && (
+          {/* Route tab strip — shown only when there is an active workspace entry and the
+              user is on the History or Workspace panel (not Parameters). */}
+          {routeTabs.length > 0 && activeWorkspaceId !== null && activePanel !== 'parameters' && (
             <div
               className={`route-tab-strip${pinnedDebris.size >= 2 ? ' route-tab-strip--below-clear-all' : ''}`}
               data-testid="route-tab-strip"
@@ -1077,7 +1145,9 @@ export default function App() {
           <DebrisGlobe
             ref={globeRef}
             debrisField={debrisField}
-            route={routeMode === 'ai' ? (activeTabRoute ?? activePlan?.route) : naivePlan?.route}
+            route={activeWorkspaceId !== null && activePanel !== 'parameters'
+              ? (routeMode === 'ai' ? (activeTabRoute ?? activePlan?.route) : naivePlan?.route)
+              : null}
             depot={activePlan?.depot}
             routeStyle={routeMode === 'ai' ? 'solid' : 'dashed'}
             routeColor={routeColor}
@@ -1490,7 +1560,8 @@ export default function App() {
                     isLatest={isLatestInWorkspace}
                     routeMode={routeMode}
                     activePlan={activePlan}
-                    onToggleNaive={handleToggleNaive}
+                    onSelectAI={handleSelectAI}
+                    onSelectNaive={handleSelectNaive}
                     onEditSelection={handleEditSelection}
                     globeRef={globeRef}
                     debrisField={debrisField}
@@ -1501,6 +1572,7 @@ export default function App() {
                     replanning={replanning}
                     onLegClick={handleLegClick}
                     onDebrisSelect={handleDebrisSelect}
+                    tabResult={activeTabResult}
                   />
                 ) : (
                   <p className="workspace-empty-label" data-testid="workspace-empty-label">
