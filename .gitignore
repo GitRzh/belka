@@ -41,11 +41,9 @@ frontend/dist/
 frontend/.vite/
 frontend/.env
 frontend/.env.local
-frontend/preview/
 
 # Misc.
 debris_cache.json
 plan_payload.json
 plan_payload_150.json
 replan_payload.json
-tests/ui

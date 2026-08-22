@@ -1348,6 +1348,18 @@ def _sweep_cache_key(req: SweepLaunchWindowRequest) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _display_date(launch_date: str) -> str:
+    """Normalize a launch_date (date-only or full ISO datetime) to one
+    consistent display string for narration/UI: 'YYYY-MM-DD HH:MM UTC'.
+    Date-only strings get 00:00 UTC."""
+    from datetime import datetime as _dt
+    if "T" in launch_date:
+        dt = _dt.strptime(launch_date, "%Y-%m-%dT%H:%M:%SZ")
+    else:
+        dt = _dt.strptime(launch_date, "%Y-%m-%d")
+    return dt.strftime("%Y-%m-%d %H:%M UTC")
+
+
 def _worst_data_quality(route_details: list[dict]) -> str:
     """Return the worst data_quality label among the visited debris in a result.
     Ranking: stale > aging > fresh. Falls back to 'unknown' if no details."""
@@ -1377,7 +1389,7 @@ def _explain_sweep(
     summary_rows = [
         {
             "day_offset":           r["day_offset"],
-            "launch_date":          r["launch_date"],
+            "launch_date":          _display_date(r["launch_date"]),
             "total_fuel_cost_km_s": r.get("total_fuel_cost_km_s"),
             "total_risk_collected": r.get("total_risk_collected"),
             "is_pareto_optimal":    r.get("is_pareto_optimal"),
@@ -1392,7 +1404,7 @@ def _explain_sweep(
             "This is a two-axis Pareto sweep: both fuel cost and risk collected vary by date "
             "because the optimizer selects different debris objects on different days. "
             f"The lowest-fuel date is day_offset={lowest_fuel_date['day_offset']} "
-            f"({lowest_fuel_date['launch_date']}), but this is only one reference point on "
+            f"({_display_date(lowest_fuel_date['launch_date'])}), but this is only one reference point on "
             "the frontier — a different date may collect more risk at higher fuel cost, which "
             "is a valid trade-off depending on operator priorities. "
             "Do NOT imply that the lowest-fuel date is 'the best' or 'recommended'."
@@ -1402,7 +1414,7 @@ def _explain_sweep(
             "This is a single-axis sweep: the target list is fixed (Custom Selection mode), "
             "so risk collected is constant across all dates. Only fuel cost varies. "
             f"The lowest-fuel date is day_offset={lowest_fuel_date['day_offset']} "
-            f"({lowest_fuel_date['launch_date']}), which is the unambiguous optimum since "
+            f"({_display_date(lowest_fuel_date['launch_date'])}), which is the unambiguous optimum since "
             "risk cannot be improved by a different date."
         )
 
@@ -1413,6 +1425,8 @@ def _explain_sweep(
         "orbital plane forward. Each date's fuel cost and risk collected reflect the "
         "deterministic route the optimizer found for that specific starting RAAN. "
         + mode_context + " "
+        "Every date below is already in its final display format "
+        "— reproduce dates exactly as given, do not reformat, abbreviate, or rewrite them. "
         "Write exactly 2-3 plain-English sentences summarising the sweep results: "
         "describe the range of fuel costs, highlight which dates are Pareto-optimal "
         "(or the best date in single-axis mode), and note any visible trend. "
