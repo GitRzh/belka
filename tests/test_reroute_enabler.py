@@ -291,13 +291,21 @@ class TestExcludeNoradIdsEndToEnd:
 
 class TestStartPositionOverride:
 
-    def _run(self, monkeypatch, applied_proposal):
+    def _run(self, monkeypatch, applied_proposal, echo_depot=False):
         monkeypatch.setattr("app.main._explain_diff", lambda diff: "stub diff")
         monkeypatch.setattr("app.main._explain_plan", lambda r: "stub plan")
-        monkeypatch.setattr(
-            "app.main._run_plan",
-            _run_plan_factory(_FAKE_PLAN_A, _FAKE_PLAN_B),
-        )
+        if echo_depot:
+            def _run_plan_echo_depot(req, **kw):
+                plan = copy.deepcopy(_FAKE_PLAN_A)
+                plan["depot"]["altitude_km"] = req.start_altitude_km
+                plan["depot"]["inclination_deg"] = req.start_inclination_deg
+                return plan
+            monkeypatch.setattr("app.main._run_plan", _run_plan_echo_depot)
+        else:
+            monkeypatch.setattr(
+                "app.main._run_plan",
+                _run_plan_factory(_FAKE_PLAN_A, _FAKE_PLAN_B),
+            )
         req = _make_replan_req(applied_proposal=applied_proposal)
         return replan(req)
 
@@ -309,6 +317,19 @@ class TestStartPositionOverride:
         )
         assert result["overrides_applied"]["start_altitude_km"] == 600.0
         assert result["overrides_applied"]["start_inclination_deg"] == 51.6
+
+    def test_new_plan_depot_reflects_altitude_inclination_override(self, monkeypatch):
+        """new_plan.depot must echo the overridden altitude/inclination — not the
+        original req values.  Uses echo_depot=True so the mock faithfully reflects
+        what req _run_plan receives, exposing any regression where the override
+        stops flowing through to the depot block."""
+        result = self._run(
+            monkeypatch,
+            applied_proposal={"start_altitude_km": 600.0, "start_inclination_deg": 51.6},
+            echo_depot=True,
+        )
+        assert result["new_plan"]["depot"]["altitude_km"] == 600.0
+        assert result["new_plan"]["depot"]["inclination_deg"] == 51.6
 
     def test_optional_raan_also_accepted(self, monkeypatch):
         """start_raan_deg is optional but accepted when provided."""

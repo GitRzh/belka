@@ -80,6 +80,106 @@ function FilterDropup({ filter, onChange, onClose }) {
   )
 }
 
+// Render the route result section for a single tab.
+// Extracted as a standalone function to avoid nested IIFEs inside JSX which
+// trip the TypeScript checker (ts1005/ts1381) even though esbuild accepts them.
+// effectiveKind: the kind to branch on — entry.kind for the latest tab, or the
+//   active tab's own type for older tabs (so a Plan tab always uses the raw-plan
+//   path even after entry.kind has been overwritten to 'replan').
+function renderRouteResult(effectiveKind, isLatest, activePlan, routeMode, tabResult, entry, replanning, onApplyProposal, globeRef, debrisField, onLegClick, onDebrisSelect) {
+  if (effectiveKind === 'plan' && isLatest) {
+    return (
+      <div className="history-live-result">
+        <ReasoningPanel
+          plan={activePlan}
+          explanationOverride={
+            routeMode === 'naive'
+              ? 'Nearest-neighbor baseline (no AI optimization)'
+              : undefined
+          }
+          proposals={activePlan?.proposals}
+          onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
+          submitting={replanning}
+          globeRef={globeRef}
+          debrisField={debrisField}
+          onLegClick={onLegClick}
+          onDebrisSelect={onDebrisSelect}
+        />
+      </div>
+    )
+  }
+  if (effectiveKind === 'plan') {
+    return (
+      <ReasoningPanel
+        plan={tabResult ?? entry.result}
+        proposals={(tabResult ?? entry.result)?.proposals}
+        onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
+        submitting={replanning}
+        globeRef={globeRef}
+        debrisField={debrisField}
+        onLegClick={onLegClick}
+        onDebrisSelect={onDebrisSelect}
+      />
+    )
+  }
+  if ((effectiveKind === 'replan' || effectiveKind === 'reroute' || effectiveKind === 'fix') && isLatest) {
+    return (
+      <div className="history-live-result">
+        <ReasoningPanel
+          plan={activePlan}
+          explanationOverride={
+            routeMode === 'naive'
+              ? 'Nearest-neighbor baseline (no AI optimization)'
+              : undefined
+          }
+          proposals={activePlan?.proposals}
+          onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
+          submitting={replanning}
+          globeRef={globeRef}
+          debrisField={debrisField}
+          onLegClick={onLegClick}
+          onDebrisSelect={onDebrisSelect}
+        />
+      </div>
+    )
+  }
+  if (effectiveKind === 'replan' || effectiveKind === 'reroute' || effectiveKind === 'fix') {
+    const displayResult = tabResult ?? entry.result
+    return (
+      <div className="replan-result">
+        {displayResult.explanation && (
+          <p className="explanation">{displayResult.explanation}</p>
+        )}
+        {displayResult.overrides_applied && Object.keys(displayResult.overrides_applied).length > 0 && (
+          <div className="overrides">
+            Overrides applied:{' '}
+            {Object.entries(displayResult.overrides_applied)
+              .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
+              .join(', ')}
+          </div>
+        )}
+        {displayResult.diff && (
+          <dl>
+            {displayResult.diff.added?.length > 0 && (
+              <><dt>Added stops</dt><dd>{displayResult.diff.added.join(', ')}</dd></>
+            )}
+            {displayResult.diff.dropped?.length > 0 && (
+              <><dt>Dropped stops</dt><dd>{displayResult.diff.dropped.join(', ')}</dd></>
+            )}
+            <dt>Fuel Δ</dt>
+            <dd>{displayResult.diff.fuel_delta_km_s > 0 ? '+' : ''}{displayResult.diff.fuel_delta_km_s} km/s</dd>
+            <dt>Risk Δ</dt>
+            <dd>{displayResult.diff.risk_delta > 0 ? '+' : ''}{displayResult.diff.risk_delta}</dd>
+          </dl>
+        )}
+        <ReasoningPanel plan={displayResult.new_plan} globeRef={globeRef} debrisField={debrisField} onLegClick={onLegClick} onDebrisSelect={onDebrisSelect} />
+      </div>
+    )
+  }
+  return null
+}
+
+
 // Render the full detail view for a single history entry.
 // Extracted so it can be used in Workspace without duplication.
 function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onSelectAI, onSelectNaive, onEditSelection, onReplan, onReroute, replanning, onApplyProposal, globeRef, debrisField, globePickedObject, onLegClick, onDebrisSelect, tabResult, tabParams, activeTabType }) {
@@ -148,93 +248,15 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
           always renders via the raw-plan path even when entry.kind has been overwritten to 'replan'. */}
       {entry.status === 'done' && (
         <>
-          {(() => {
-            // Determine which render branch to use for the current view.
-            // isLatest: use entry.kind (live state is always correct for the latest tab).
-            // non-latest: use activeTabType so a Plan tab's own shape is honoured even when
-            //   entry.kind has been permanently overwritten to 'replan' by a later operation.
-            const effectiveKind = isLatest ? entry.kind : (activeTabType ?? entry.kind)
-            return effectiveKind === 'plan' && isLatest ? (
-            <div className="history-live-result">
-              <ReasoningPanel
-                plan={activePlan}
-                explanationOverride={
-                  routeMode === 'naive'
-                    ? 'Nearest-neighbor baseline (no AI optimization)'
-                    : undefined
-                }
-                proposals={activePlan?.proposals}
-                onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
-                submitting={replanning}
-                globeRef={globeRef}
-                debrisField={debrisField}
-                onLegClick={onLegClick}
-                onDebrisSelect={onDebrisSelect}
-              />
-            </div>
-          ) : effectiveKind === 'plan' ? (
-            <ReasoningPanel
-              plan={tabResult ?? entry.result}
-              proposals={(tabResult ?? entry.result)?.proposals}
-              onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
-              submitting={replanning}
-              globeRef={globeRef}
-              debrisField={debrisField}
-              onLegClick={onLegClick}
-              onDebrisSelect={onDebrisSelect}
-            />
-          ) : (effectiveKind === 'replan' || effectiveKind === 'reroute' || effectiveKind === 'fix') && isLatest ? (
-            <div className="history-live-result">
-              <ReasoningPanel
-                plan={activePlan}
-                explanationOverride={
-                  routeMode === 'naive'
-                    ? 'Nearest-neighbor baseline (no AI optimization)'
-                    : undefined
-                }
-                proposals={activePlan?.proposals}
-                onApplyProposal={(proposal) => onApplyProposal?.(entry, proposal)}
-                submitting={replanning}
-                globeRef={globeRef}
-                debrisField={debrisField}
-                onLegClick={onLegClick}
-                onDebrisSelect={onDebrisSelect}
-              />
-            </div>
-          ) : (effectiveKind === 'replan' || effectiveKind === 'reroute' || effectiveKind === 'fix') ? (() => {
-            const displayResult = tabResult ?? entry.result
-            return (
-              <div className="replan-result">
-                {displayResult.explanation && (
-                  <p className="explanation">{displayResult.explanation}</p>
-                )}
-                {displayResult.overrides_applied && Object.keys(displayResult.overrides_applied).length > 0 && (
-                  <div className="overrides">
-                    Overrides applied:{' '}
-                    {Object.entries(displayResult.overrides_applied)
-                      .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
-                      .join(', ')}
-                  </div>
-                )}
-                {displayResult.diff && (
-                  <dl>
-                    {displayResult.diff.added?.length > 0 && (
-                      <><dt>Added stops</dt><dd>{displayResult.diff.added.join(', ')}</dd></>
-                    )}
-                    {displayResult.diff.dropped?.length > 0 && (
-                      <><dt>Dropped stops</dt><dd>{displayResult.diff.dropped.join(', ')}</dd></>
-                    )}
-                    <dt>Fuel Δ</dt>
-                    <dd>{displayResult.diff.fuel_delta_km_s > 0 ? '+' : ''}{displayResult.diff.fuel_delta_km_s} km/s</dd>
-                    <dt>Risk Δ</dt>
-                    <dd>{displayResult.diff.risk_delta > 0 ? '+' : ''}{displayResult.diff.risk_delta}</dd>
-                  </dl>
-                )}
-                <ReasoningPanel plan={displayResult.new_plan} globeRef={globeRef} debrisField={debrisField} onLegClick={onLegClick} onDebrisSelect={onDebrisSelect} />
-              </div>
-            )
-          })() : null
-          })()}
+          {/* Branch on effectiveKind (the active tab's own type for non-latest views) so that
+              a Plan tab always uses the raw-plan path even when entry.kind has been
+              overwritten to 'replan' by a later operation. */}
+          {renderRouteResult(
+            isLatest ? entry.kind : (activeTabType ?? entry.kind),
+            isLatest,
+            activePlan, routeMode, tabResult, entry,
+            replanning, onApplyProposal, globeRef, debrisField, onLegClick, onDebrisSelect
+          )}
           {entry.kind === 'mission_cost' && (mcResult => (
             <div className="mc-history-result">
               {entry.overridesApplied && Object.keys(entry.overridesApplied).length > 0 && (
@@ -1316,8 +1338,8 @@ export default function App() {
               toNoradId={activeLeg.toNoradId}
               legIndex={activeLeg.legIndex}
               onClose={handleLegClose}
-              depotAltitudeKm={activePlan?.depot?.altitude_km}
-              depotInclinationDeg={activePlan?.depot?.inclination_deg}
+              depotAltitudeKm={(activeTabResult?.new_plan ?? activeTabResult ?? activePlan)?.depot?.altitude_km}
+              depotInclinationDeg={(activeTabResult?.new_plan ?? activeTabResult ?? activePlan)?.depot?.inclination_deg}
             />
           )}
 

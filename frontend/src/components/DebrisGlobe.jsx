@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
+import { useState, useEffect, useRef, forwardRef, useImperativeHandle, useMemo } from 'react'
 import { Viewer, Entity, PolylineGraphics, PointGraphics } from 'resium'
 import { BoundingSphere, Cartesian3, Color, Credit, PolylineDashMaterialProperty, ScreenSpaceEventType } from 'cesium'
 
@@ -137,6 +137,15 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
   onDebrisToggleSelect,
   onBackgroundClick,
 }, ref) {
+  const routeMaterial = useMemo(() => (
+    routeStyle === 'solid'
+      ? Color.fromCssColorString(routeColor)
+      : new PolylineDashMaterialProperty({
+          color: Color.fromCssColorString('#8A8A8E').withAlpha(0.85),
+          dashLength: 16,
+        })
+  ), [routeStyle, routeColor])
+
   const viewerRef = useRef(null)
   // Track pin entities keyed by caller-provided id so we can remove the old one on re-pin.
   const pinEntitiesRef = useRef({})
@@ -452,14 +461,7 @@ const DebrisGlobe = forwardRef(function DebrisGlobe({
           <PolylineGraphics
             positions={routePositions}
             width={routeStyle === 'solid' ? 3 : 2}
-            material={
-              routeStyle === 'solid'
-                ? Color.fromCssColorString(routeColor)
-                : new PolylineDashMaterialProperty({
-                    color: Color.fromCssColorString('#8A8A8E').withAlpha(0.85),
-                    dashLength: 16,
-                  })
-            }
+            material={routeMaterial}
             disableDepthTestDistance={Number.POSITIVE_INFINITY}
           />
         </Entity>

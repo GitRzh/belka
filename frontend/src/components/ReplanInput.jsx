@@ -327,7 +327,7 @@ export default function ReplanInput({
                       ? `${round1(obj.altitude_km)} km / ${round2(obj.inclination_deg ?? 0)}°`
                       : 'Orbit data unavailable'}
                   >
-                    Match {obj.name}
+                    Match {obj.name} ({obj.norad_id})
                   </button>
                 ))}
               </div>
@@ -353,7 +353,7 @@ export default function ReplanInput({
                     onChange={() => toggleExclude(obj.norad_id)}
                     disabled={submitting}
                   />
-                  {obj.name}
+                  {obj.name} ({obj.norad_id})
                 </label>
               ))}
             </fieldset>
