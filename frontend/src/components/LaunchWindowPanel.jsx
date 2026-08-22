@@ -22,6 +22,19 @@ import {
   BarChart, Bar,
 } from 'recharts'
 
+function formatDisplayDate(launchDate) {
+  if (!launchDate) return launchDate
+  const isoMatch = launchDate.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):\d{2}Z$/)
+  if (isoMatch) {
+    const [, datePart, hh, mm] = isoMatch
+    return `${datePart} ${hh}:${mm} UTC`
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(launchDate)) {
+    return `${launchDate} 00:00 UTC`
+  }
+  return launchDate  // unexpected shape — fail safe, don't crash
+}
+
 const COLOR_OPTIMAL   = '#f2f2f0'
 const COLOR_DOMINATED = '#4a4a4e'
 const COLOR_BEST_FUEL = '#8a8a8e'  // mid — lowest_fuel annotation bar
@@ -70,7 +83,7 @@ function GrayTooltip({ active, payload }) {
       fontSize: 11,
     }}>
       <div style={{ marginBottom: 3, color: 'var(--c-ink)', fontWeight: 600 }}>
-        {d.launch_date ?? `Day +${d.day_offset}`}
+        {d.launch_date ? formatDisplayDate(d.launch_date) : `Day +${d.day_offset}`}
       </div>
       {d.total_fuel_cost_km_s != null && (
         <div style={{ color: 'var(--c-steel)' }}>
@@ -190,7 +203,7 @@ function ParetoScatter({ window, lowestFuelDate, onSelectDate }) {
       {lowestFuelDate && (
         <div style={{ fontSize: 10, color: 'var(--c-steel)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>
           <span style={{ border: '1px dashed var(--c-ink)', padding: '0 3px', marginRight: 4 }}>dashed ring</span>
-          = lowest-fuel date ({lowestFuelDate.launch_date}) — one reference point, not the only valid choice
+          = lowest-fuel date ({formatDisplayDate(lowestFuelDate.launch_date)}) — one reference point, not the only valid choice
         </div>
       )}
     </div>
@@ -261,7 +274,7 @@ function SingleAxisBar({ window, lowestFuelDate, onSelectDate }) {
       </ResponsiveContainer>
       {lowestFuelDate && (
         <div style={{ fontSize: 10, color: 'var(--c-steel)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>
-          <span style={{ color: COLOR_OPTIMAL }}>■</span> = lowest-fuel date ({lowestFuelDate.launch_date})
+          <span style={{ color: COLOR_OPTIMAL }}>■</span> = lowest-fuel date ({formatDisplayDate(lowestFuelDate.launch_date)})
         </div>
       )}
     </div>

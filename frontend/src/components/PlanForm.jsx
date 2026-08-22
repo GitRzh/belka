@@ -85,7 +85,10 @@ export default function PlanForm({ onSubmit, onCompare, onSweep, onChange, submi
   // still produces a new object reference and re-fires this effect.
   useEffect(() => {
     if (presetWeights != null) {
-      updateAdvanced('weights_json', JSON.stringify(presetWeights.weights, null, 2))
+      updateAdvanced(
+        'weights_json',
+        JSON.stringify(presetWeights.weights).replace(/,/g, ', ').replace(/:/g, ': ')
+      )
     }
   }, [presetWeights])
 
