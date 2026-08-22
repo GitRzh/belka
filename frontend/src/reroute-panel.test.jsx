@@ -145,7 +145,7 @@ describe('1) Fuel prefill math', () => {
     // Alpha is route_details[0] → step_breakdown[0].delta_v_km_s = 1.5
     // prefill = 10 - 1.5 = 8.5
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Match Alpha' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Match Alpha (1001)' }))
     })
 
     const fuelInput = getFuelNumberInput()
@@ -160,7 +160,7 @@ describe('1) Fuel prefill math', () => {
     // Bravo is route_details[1] → step_breakdown[0..1] = 1.5 + 2.25 = 3.75
     // prefill = 10 - 3.75 = 6.25 → round1 → 6.3 (Math.round(62.5)/10 = 63/10)
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo (1002)' }))
     })
 
     const fuelInput = getFuelNumberInput()
@@ -175,7 +175,7 @@ describe('1) Fuel prefill math', () => {
     // Charlie is route_details[2] → step_breakdown[0..2] = 1.5 + 2.25 + 0.75 = 4.5
     // prefill = 10 - 4.5 = 5.5
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Match Charlie' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Match Charlie (1003)' }))
     })
 
     const fuelInput = getFuelNumberInput()
@@ -214,7 +214,7 @@ describe('1) Fuel prefill math', () => {
     await switchToReroute()
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo (1002)' }))
     })
 
     const fuelInput = getFuelNumberInput()
@@ -230,7 +230,7 @@ describe('1) Fuel prefill math', () => {
     await switchToReroute()
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo (1002)' }))
     })
 
     const fuelInput = getFuelNumberInput()
@@ -247,7 +247,7 @@ describe('1) Fuel prefill math', () => {
 
     // Match Bravo → fuel = 10 - 3.75 = 6.25 → round1 → 6.3
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Match Bravo (1002)' }))
     })
 
     await act(async () => {
