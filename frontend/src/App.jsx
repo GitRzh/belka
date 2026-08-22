@@ -82,17 +82,17 @@ function FilterDropup({ filter, onChange, onClose }) {
 
 // Render the full detail view for a single history entry.
 // Extracted so it can be used in Workspace without duplication.
-function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onSelectAI, onSelectNaive, onEditSelection, onReplan, onReroute, replanning, onApplyProposal, globeRef, debrisField, globePickedObject, onLegClick, onDebrisSelect, tabResult }) {
+function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, onSelectAI, onSelectNaive, onEditSelection, onReplan, onReroute, replanning, onApplyProposal, globeRef, debrisField, globePickedObject, onLegClick, onDebrisSelect, tabResult, tabParams, activeTabType }) {
   if (entry.status === 'running') {
     return <p className="history-summary" style={{ marginTop: 8 }}>Running…</p>
   }
 
   return (
     <>
-      {/* Parameter summary */}
-      {entry.kind === 'mission_cost' && entry.params && (
+      {/* Parameter summary — uses the active tab's own params snapshot when available */}
+      {entry.kind === 'mission_cost' && (tabParams ?? entry.params) && (
         <dl className="history-params">
-          {summariseParams(entry.params).map(([label, value]) => (
+          {summariseParams(tabParams ?? entry.params).map(([label, value]) => (
             <Fragment key={label}>
               <dt>{label}</dt>
               <dd>{value}</dd>
@@ -106,9 +106,9 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
           )}
         </dl>
       )}
-      {entry.kind !== 'mission_cost' && entry.params && (
+      {entry.kind !== 'mission_cost' && (tabParams ?? entry.params) && (
         <dl className="history-params">
-          {summariseParams(entry.params).map(([label, value]) => (
+          {summariseParams(tabParams ?? entry.params).map(([label, value]) => (
             <Fragment key={label}>
               <dt>{label}</dt>
               <dd>{value}</dd>
@@ -143,10 +143,18 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
         </div>
       )}
 
-      {/* Route result — uses tabResult snapshot when available (non-latest tabs), else entry.result */}
+      {/* Route result — uses tabResult snapshot when available (non-latest tabs), else entry.result.
+          Branch on activeTabType (the active tab's own type) for non-latest views so that a Plan tab
+          always renders via the raw-plan path even when entry.kind has been overwritten to 'replan'. */}
       {entry.status === 'done' && (
         <>
-          {entry.kind === 'plan' && isLatest ? (
+          {(() => {
+            // Determine which render branch to use for the current view.
+            // isLatest: use entry.kind (live state is always correct for the latest tab).
+            // non-latest: use activeTabType so a Plan tab's own shape is honoured even when
+            //   entry.kind has been permanently overwritten to 'replan' by a later operation.
+            const effectiveKind = isLatest ? entry.kind : (activeTabType ?? entry.kind)
+            return effectiveKind === 'plan' && isLatest ? (
             <div className="history-live-result">
               <ReasoningPanel
                 plan={activePlan}
@@ -164,7 +172,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                 onDebrisSelect={onDebrisSelect}
               />
             </div>
-          ) : entry.kind === 'plan' ? (
+          ) : effectiveKind === 'plan' ? (
             <ReasoningPanel
               plan={tabResult ?? entry.result}
               proposals={(tabResult ?? entry.result)?.proposals}
@@ -175,7 +183,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
               onLegClick={onLegClick}
               onDebrisSelect={onDebrisSelect}
             />
-          ) : entry.kind === 'replan' && isLatest ? (
+          ) : (effectiveKind === 'replan' || effectiveKind === 'reroute' || effectiveKind === 'fix') && isLatest ? (
             <div className="history-live-result">
               <ReasoningPanel
                 plan={activePlan}
@@ -193,7 +201,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                 onDebrisSelect={onDebrisSelect}
               />
             </div>
-          ) : entry.kind === 'replan' ? (() => {
+          ) : (effectiveKind === 'replan' || effectiveKind === 'reroute' || effectiveKind === 'fix') ? (() => {
             const displayResult = tabResult ?? entry.result
             return (
               <div className="replan-result">
@@ -225,10 +233,9 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                 <ReasoningPanel plan={displayResult.new_plan} globeRef={globeRef} debrisField={debrisField} onLegClick={onLegClick} onDebrisSelect={onDebrisSelect} />
               </div>
             )
-          })() : null}
-          {entry.kind === 'mission_cost' && (() => {
-            const mcResult = tabResult ?? entry.result
-            return (
+          })() : null
+          })()}
+          {entry.kind === 'mission_cost' && (mcResult => (
             <div className="mc-history-result">
               {entry.overridesApplied && Object.keys(entry.overridesApplied).length > 0 && (
                 <div className="mc-overrides-applied">
@@ -308,8 +315,7 @@ function EntryDetailView({ entry, entryNumber, isLatest, routeMode, activePlan, 
                 </button>
               )}
             </div>
-            )
-          })()}
+          ))(tabResult ?? entry.result)}
           {entry.status === 'error' && (
             <p className="history-error">{entry.error}</p>
           )}
@@ -561,7 +567,9 @@ export default function App() {
       setPlan(result)
       setRouteMode('ai')
       // Store Plan tab on the entry itself; reset per-kind counters for this new chain.
-      const planTab = { label: 'Plan', route: result.route ?? [], type: 'plan', entryId: id, result }
+      // params is stored on the tab so EntryDetailView can show the correct budget/weights
+      // when this tab is viewed after a later replan changes entry.params.
+      const planTab = { label: 'Plan', route: result.route ?? [], type: 'plan', entryId: id, result, params: payload }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', result, tabs: [planTab] } : e))
       setActiveRouteTabIdx(0)
       replanCounterRef.current = 0
@@ -630,7 +638,8 @@ export default function App() {
   // Drops the oldest non-plan tab if the chain is at cap, Plan tab always stays.
   // kind: 'replan' | 'reroute' | 'fix' | 'mission_cost'
   // result: full API response snapshot for this tab
-  function appendReplanTab(newRoute, kind, entryId, result) {
+  // params: the effective params that produced this result (stored on the tab for Bug A)
+  function appendReplanTab(newRoute, kind, entryId, result, params) {
     const counterRef = kind === 'reroute' ? rerouteCounterRef
       : kind === 'fix' ? fixCounterRef
       : replanCounterRef
@@ -639,7 +648,7 @@ export default function App() {
       : kind === 'fix' ? `Fix #${counterRef.current}`
       : kind === 'mission_cost' ? `Custom #${counterRef.current}`
       : `Replan #${counterRef.current}`
-    const newTab = { label, route: newRoute ?? [], type: kind, entryId, result: result ?? null }
+    const newTab = { label, route: newRoute ?? [], type: kind, entryId, result: result ?? null, params: params ?? null }
     setHistory(prev => prev.map(e => {
       if (e.id !== entryId) return e
       const planTab = e.tabs?.[0] ?? { label: 'Plan', route: [] }
@@ -672,8 +681,9 @@ export default function App() {
       // rather than the original pre-replan values.
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'replan', params: effectiveParams, result, timestamp: e.timestamp ?? new Date().toISOString() } : e))
-      // Append replan tab with full result snapshot
-      appendReplanTab(result.new_plan?.route, 'replan', id, result)
+      // Append replan tab with full result snapshot (pass effectiveParams so the tab
+      // shows its own budget/weights even after a later replan changes entry.params)
+      appendReplanTab(result.new_plan?.route, 'replan', id, result, effectiveParams)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -727,7 +737,7 @@ export default function App() {
         overridesApplied: startOverrides,
       } : e))
       // Append tab with the new costResult snapshot (mission_cost uses replanCounterRef)
-      appendReplanTab(costResult.route ?? [], 'mission_cost', id, costResult)
+      appendReplanTab(costResult.route ?? [], 'mission_cost', id, costResult, newPayload)
     } catch (err) {
       setHistory(h => h.map(e => e.id === id ? {
         ...e, status: 'error', error: err.body?.detail || err.message,
@@ -892,13 +902,14 @@ export default function App() {
 
   function handleConfirmMissionCost(costResult, startParams, targetNoradIds, maxWaitDays) {
     const id = crypto.randomUUID()
-    const mcPlanTab = { label: 'Plan', route: costResult.route ?? [], type: 'mission_cost', entryId: id, result: costResult }
+    const mcPayload = buildMissionCostPayload(startParams, targetNoradIds, maxWaitDays)
+    const mcPlanTab = { label: 'Plan', route: costResult.route ?? [], type: 'mission_cost', entryId: id, result: costResult, params: mcPayload }
     setHistory(h => [...h, {
       id,
       kind: 'mission_cost',
       opKind: 'mission_cost',
       status: 'done',
-      params: buildMissionCostPayload(startParams, targetNoradIds, maxWaitDays),
+      params: mcPayload,
       result: costResult,
       error: null,
       targetNoradIds,
@@ -967,7 +978,7 @@ export default function App() {
       setNaivePlan(null)
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'reroute', params: effectiveParams, result, kind: 'replan', timestamp: e.timestamp ?? new Date().toISOString() } : e))
-      appendReplanTab(result.new_plan?.route, 'reroute', id, result)
+      appendReplanTab(result.new_plan?.route, 'reroute', id, result, effectiveParams)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -1005,7 +1016,7 @@ export default function App() {
       const effectiveParams = { ...replanParams, ...(result.overrides_applied ?? {}) }
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', opKind: 'fix', params: effectiveParams, result, kind: 'replan', timestamp: e.timestamp ?? new Date().toISOString() } : e))
       // Append fix tab with full result snapshot
-      appendReplanTab(result.new_plan?.route, 'fix', id, result)
+      appendReplanTab(result.new_plan?.route, 'fix', id, result, effectiveParams)
     } catch (err) {
       setFormError(err.body?.detail || err.message)
       setHistory(h => h.map(e => e.id === id ? { ...e, status: 'error', error: err.message } : e))
@@ -1057,11 +1068,12 @@ export default function App() {
     return diffIds.size > 0 ? diffIds : null
   })()
 
-  // The active tab's result snapshot — used to render per-tab Workspace content.
+  // The active tab's result and params snapshots — used to render per-tab Workspace content.
   const activeTab = activeWorkspaceTabs.length > 0
     ? activeWorkspaceTabs[Math.min(activeRouteTabIdx, activeWorkspaceTabs.length - 1)]
     : null
   const activeTabResult = activeTab?.result ?? null
+  const activeTabParams = activeTab?.params ?? null
 
   // isLatestInWorkspace: true only when (a) the workspace entry is the latest overall
   // AND (b) the active tab is the last in that entry's tabs (so clicking back to the
@@ -1564,6 +1576,8 @@ export default function App() {
                     onLegClick={handleLegClick}
                     onDebrisSelect={handleDebrisSelect}
                     tabResult={activeTabResult}
+                    tabParams={activeTabParams}
+                    activeTabType={activeTab?.type ?? null}
                   />
                 ) : (
                   <p className="workspace-empty-label" data-testid="workspace-empty-label">
