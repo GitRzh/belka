@@ -477,12 +477,9 @@ export default function App() {
   const [focusMode, setFocusMode] = useState('dim')
   const [history, setHistory] = useState([])
 
-  // Route tab strip — always: Plan tab (index 0) + up to MAX_ROUTE_REPLAN_TABS replan tabs.
-  // Each entry: { label: string, route: string[], type: 'plan'|'replan'|'reroute'|'fix'|'mission_cost', entryId: string, result: object }
-  // entryId ties a tab back to the history entry it was generated from, so the
-  // tab strip and the History panel can stay in sync in both directions (Q1).
-  // result: full API response snapshot for this tab — used to render per-tab Workspace content.
-  const [routeTabs, setRouteTabs] = useState([])
+  // activeRouteTabIdx: index into the active workspace entry's own tabs array.
+  // Tabs are stored per-chain on each history entry as entry.tabs[], so switching
+  // workspace entries never loses another chain's tab history.
   const [activeRouteTabIdx, setActiveRouteTabIdx] = useState(0)
 
   // Independent per-kind labeling counters (ref-based, not derived from the
@@ -563,11 +560,10 @@ export default function App() {
       const result = await api.plan(payload)
       setPlan(result)
       setRouteMode('ai')
-      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', result } : e))
-      // Reset route tab strip to just the Plan tab (with full result snapshot)
-      setRouteTabs([{ label: 'Plan', route: result.route ?? [], type: 'plan', entryId: id, result }])
+      // Store Plan tab on the entry itself; reset per-kind counters for this new chain.
+      const planTab = { label: 'Plan', route: result.route ?? [], type: 'plan', entryId: id, result }
+      setHistory(h => h.map(e => e.id === id ? { ...e, status: 'done', result, tabs: [planTab] } : e))
       setActiveRouteTabIdx(0)
-      // Reset per-kind counters for the new plan chain.
       replanCounterRef.current = 0
       rerouteCounterRef.current = 0
       fixCounterRef.current = 0
@@ -630,11 +626,10 @@ export default function App() {
     setSweepLaunchDateToApply({ date: dateStr, seq: sweepLaunchDateSeqRef.current })
   }
 
-  // Helper: append a new replan/reroute/fix/mission_cost tab (drops oldest replan if over cap;
-  // Plan/first tab always stays). Stores the full result snapshot so clicking an older tab
-  // restores that tab's own Workspace content, not the latest.
+  // Append a new tab to the target entry's own tabs array (per-chain storage).
+  // Drops the oldest non-plan tab if the chain is at cap, Plan tab always stays.
   // kind: 'replan' | 'reroute' | 'fix' | 'mission_cost'
-  // result: full API response for this tab (snapshot)
+  // result: full API response snapshot for this tab
   function appendReplanTab(newRoute, kind, entryId, result) {
     const counterRef = kind === 'reroute' ? rerouteCounterRef
       : kind === 'fix' ? fixCounterRef
@@ -644,18 +639,19 @@ export default function App() {
       : kind === 'fix' ? `Fix #${counterRef.current}`
       : kind === 'mission_cost' ? `Custom #${counterRef.current}`
       : `Replan #${counterRef.current}`
-    setRouteTabs(prev => {
-      const planTab = prev[0] ?? { label: 'Plan', route: [] }
-      const replanTabs = prev.slice(1)
-      // Drop oldest replan if at cap
+    const newTab = { label, route: newRoute ?? [], type: kind, entryId, result: result ?? null }
+    setHistory(prev => prev.map(e => {
+      if (e.id !== entryId) return e
+      const planTab = e.tabs?.[0] ?? { label: 'Plan', route: [] }
+      const replanTabs = (e.tabs ?? []).slice(1)
       const trimmed = replanTabs.length >= MAX_ROUTE_REPLAN_TABS
         ? replanTabs.slice(1)
         : replanTabs
-      const nextTabs = [planTab, ...trimmed, { label, route: newRoute ?? [], type: kind, entryId, result: result ?? null }]
+      const nextTabs = [planTab, ...trimmed, newTab]
       // Schedule active-index update to point at the new last tab.
       setActiveRouteTabIdx(nextTabs.length - 1)
-      return nextTabs
-    })
+      return { ...e, tabs: nextTabs }
+    }))
   }
 
   // Replan now OVERWRITES the same entry in-place (no branching).
@@ -896,6 +892,7 @@ export default function App() {
 
   function handleConfirmMissionCost(costResult, startParams, targetNoradIds, maxWaitDays) {
     const id = crypto.randomUUID()
+    const mcPlanTab = { label: 'Plan', route: costResult.route ?? [], type: 'mission_cost', entryId: id, result: costResult }
     setHistory(h => [...h, {
       id,
       kind: 'mission_cost',
@@ -908,13 +905,11 @@ export default function App() {
       startParams,
       maxWaitDays: maxWaitDays ?? '',
       timestamp: new Date().toISOString(),
+      tabs: [mcPlanTab],
     }].slice(-MAX_HISTORY))
     setActiveWorkspaceId(id)
     setActivePanel('workspace')
-    // Initialize tab strip for this mission_cost entry (Plan tab = the initial result)
-    setRouteTabs([{ label: 'Plan', route: costResult.route ?? [], type: 'mission_cost', entryId: id, result: costResult }])
     setActiveRouteTabIdx(0)
-    // Reset per-kind counters for the new chain
     replanCounterRef.current = 0
     rerouteCounterRef.current = 0
     fixCounterRef.current = 0
@@ -1026,69 +1021,69 @@ export default function App() {
     return history.findIndex(e => e.id === entryId) + 1
   }
 
-  // Route tab strip derived values.
-  // Only resolve to a tab route when in AI mode — naive mode always bypasses
-  // the tab strip and reads naivePlan.route directly on the globe prop below.
-  const activeTabRoute = routeMode === 'ai' && routeTabs.length > 0
-    ? routeTabs[Math.min(activeRouteTabIdx, routeTabs.length - 1)].route
+  const activeWorkspaceEntry = activeWorkspaceId ? history.find(e => e.id === activeWorkspaceId) : null
+  const latestEntry = history.length > 0 ? history[history.length - 1] : null
+  const summaryPrefilledStart = customSelectionEditEntry?.startParams ?? null
+
+  // Per-chain tabs: each entry owns its own tabs array; derive the active entry's tabs.
+  const activeWorkspaceTabs = activeWorkspaceEntry?.tabs ?? []
+
+  // Route tab strip derived values (now reading from the active entry's own tabs).
+  // Only resolve to a tab route when in AI mode — naive mode bypasses the tab strip.
+  const activeTabRoute = routeMode === 'ai' && activeWorkspaceTabs.length > 0
+    ? activeWorkspaceTabs[Math.min(activeRouteTabIdx, activeWorkspaceTabs.length - 1)].route
     : null
 
   // Route recency color for the active tab's polyline.
-  // Rule: white if plan tab with no replans; green if this is the latest replan tab;
-  // orange for everything else (plan tab once any replan exists, or older replan tabs).
   const routeColor = (() => {
-    if (routeTabs.length === 0) return 'white'
-    // 'replan' | 'reroute' | 'fix' are all non-Plan modification kinds now
-    // (previously only 'replan' existed) — any of them counts here.
-    const hasAnyReplan = routeTabs.some(t => t.type !== 'plan')
-    const activeTab = routeTabs[Math.min(activeRouteTabIdx, routeTabs.length - 1)]
+    if (activeWorkspaceTabs.length === 0) return 'white'
+    const hasAnyReplan = activeWorkspaceTabs.some(t => t.type !== 'plan' && t.type !== 'mission_cost')
+    const activeTab = activeWorkspaceTabs[Math.min(activeRouteTabIdx, activeWorkspaceTabs.length - 1)]
     if (!hasAnyReplan) return 'white'
-    const lastReplanIdx = routeTabs.reduce((best, t, i) => t.type !== 'plan' ? i : best, -1)
-    const activeIdx = Math.min(activeRouteTabIdx, routeTabs.length - 1)
-    if (activeTab.type !== 'plan' && activeIdx === lastReplanIdx) return '#B4FF00'
+    const lastReplanIdx = activeWorkspaceTabs.reduce((best, t, i) => (t.type !== 'plan' && t.type !== 'mission_cost') ? i : best, -1)
+    const activeIdx = Math.min(activeRouteTabIdx, activeWorkspaceTabs.length - 1)
+    if (activeTab.type !== 'plan' && activeTab.type !== 'mission_cost' && activeIdx === lastReplanIdx) return '#B4FF00'
     return 'orange'
   })()
 
   // Diff highlight: for any replan tab, find debris stops that differ from the previous tab.
   const diffHighlightIds = (() => {
-    if (routeTabs.length < 2 || activeRouteTabIdx === 0) return null
-    const prevRoute = routeTabs[activeRouteTabIdx - 1]?.route ?? []
-    const currRoute = routeTabs[activeRouteTabIdx]?.route ?? []
+    if (activeWorkspaceTabs.length < 2 || activeRouteTabIdx === 0) return null
+    const prevRoute = activeWorkspaceTabs[activeRouteTabIdx - 1]?.route ?? []
+    const currRoute = activeWorkspaceTabs[activeRouteTabIdx]?.route ?? []
     const prevIds = new Set(prevRoute.map(noradIdFromLabel).filter(Boolean))
     const currIds = new Set(currRoute.map(noradIdFromLabel).filter(Boolean))
-    // Stops present in current tab but not in the previous tab (added/changed).
     const diffIds = new Set([...currIds].filter(id => !prevIds.has(id)))
     return diffIds.size > 0 ? diffIds : null
   })()
 
-  const activeWorkspaceEntry = activeWorkspaceId ? history.find(e => e.id === activeWorkspaceId) : null
-  const latestEntry = history.length > 0 ? history[history.length - 1] : null
-  const summaryPrefilledStart = customSelectionEditEntry?.startParams ?? null
+  // The active tab's result snapshot — used to render per-tab Workspace content.
+  const activeTab = activeWorkspaceTabs.length > 0
+    ? activeWorkspaceTabs[Math.min(activeRouteTabIdx, activeWorkspaceTabs.length - 1)]
+    : null
+  const activeTabResult = activeTab?.result ?? null
 
-  // The active tab's result snapshot — used to render per-tab Workspace content for non-latest tabs.
-  // When the active tab belongs to the currently shown workspace entry, pass its stored result.
-  const activeTab = routeTabs.length > 0 ? routeTabs[Math.min(activeRouteTabIdx, routeTabs.length - 1)] : null
-  const activeTabResult = (activeTab && activeTab.entryId === activeWorkspaceId) ? activeTab.result : null
-
-  // isLatestInWorkspace: true only when both (a) the workspace entry is the latest overall
-  // AND (b) the active tab is the last tab in the strip (so "Plan" tab in a replanned chain
-  // still falls through to the snapshot path and shows the Plan tab's own saved result,
-  // not activePlan which holds the most recent replan's plan).
-  const isLastTab = routeTabs.length === 0 || activeRouteTabIdx >= routeTabs.length - 1
+  // isLatestInWorkspace: true only when (a) the workspace entry is the latest overall
+  // AND (b) the active tab is the last in that entry's tabs (so clicking back to the
+  // Plan tab in a replanned chain still shows the Plan tab's own snapshot).
+  const isLastTab = activeWorkspaceTabs.length === 0 || activeRouteTabIdx >= activeWorkspaceTabs.length - 1
   const isLatestInWorkspace = activeWorkspaceEntry?.id === latestEntry?.id && isLastTab
 
-  // Select a history entry from the Workspace/History panel and keep the route
-  // tab strip in sync: default to the LAST tab in this entry's chain so the user
-  // sees the most recent result when they click the history row.
+  // displayedRouteMode: for non-latest views, always show AI snapshot regardless of
+  // global routeMode state (Bug 2 defense-in-depth — state may lag behind a switch).
+  const displayedRouteMode = isLatestInWorkspace ? routeMode : 'ai'
+
+  // Select a history entry: switch workspace, reset route mode (Bug 2), and jump to
+  // the last tab in that entry's own chain so the user sees the most recent result.
   function selectWorkspaceEntry(entryId) {
+    if (entryId !== activeWorkspaceId) {
+      setRouteMode('ai')
+      setNaivePlan(null)
+    }
     setActiveWorkspaceId(entryId)
     setActivePanel('workspace')
-    // Find the last tab belonging to this entry (latest result in the chain).
-    let lastTabIdx = -1
-    for (let i = routeTabs.length - 1; i >= 0; i--) {
-      if (routeTabs[i].entryId === entryId) { lastTabIdx = i; break }
-    }
-    if (lastTabIdx !== -1) setActiveRouteTabIdx(lastTabIdx)
+    const entryTabs = history.find(e => e.id === entryId)?.tabs ?? []
+    setActiveRouteTabIdx(entryTabs.length > 0 ? entryTabs.length - 1 : 0)
   }
 
   if (debrisFieldError) {
@@ -1120,21 +1115,17 @@ export default function App() {
 
           {/* Route tab strip — shown only when there is an active workspace entry and the
               user is on the History or Workspace panel (not Parameters). */}
-          {routeTabs.length > 0 && activeWorkspaceId !== null && activePanel !== 'parameters' && (
+          {activeWorkspaceTabs.length > 0 && activeWorkspaceId !== null && activePanel !== 'parameters' && (
             <div
               className={`route-tab-strip${pinnedDebris.size >= 2 ? ' route-tab-strip--below-clear-all' : ''}`}
               data-testid="route-tab-strip"
             >
               <span className="route-tab-strip-label">Route</span>
-              {routeTabs.map((tab, idx) => (
+              {activeWorkspaceTabs.map((tab, idx) => (
                 <button
                   key={idx}
                   className={`route-tab-btn${activeRouteTabIdx === idx ? ' route-tab-btn--active' : ''}`}
-                  onClick={() => {
-                    setActiveRouteTabIdx(idx)
-                    // Keep History panel selection in sync with the tab strip (Q1).
-                    if (tab.entryId != null) setActiveWorkspaceId(tab.entryId)
-                  }}
+                  onClick={() => setActiveRouteTabIdx(idx)}
                 >
                   {tab.label}
                 </button>
@@ -1146,10 +1137,10 @@ export default function App() {
             ref={globeRef}
             debrisField={debrisField}
             route={activeWorkspaceId !== null && activePanel !== 'parameters'
-              ? (routeMode === 'ai' ? (activeTabRoute ?? activePlan?.route) : naivePlan?.route)
+              ? (displayedRouteMode === 'ai' ? (activeTabRoute ?? activePlan?.route) : naivePlan?.route)
               : null}
             depot={activePlan?.depot}
-            routeStyle={routeMode === 'ai' ? 'solid' : 'dashed'}
+            routeStyle={displayedRouteMode === 'ai' ? 'solid' : 'dashed'}
             routeColor={routeColor}
             cacheMetadata={cacheMetadata}
             focusMode={focusMode}
@@ -1558,7 +1549,7 @@ export default function App() {
                     entry={activeWorkspaceEntry}
                     entryNumber={getEntryNumber(activeWorkspaceEntry.id)}
                     isLatest={isLatestInWorkspace}
-                    routeMode={routeMode}
+                    routeMode={displayedRouteMode}
                     activePlan={activePlan}
                     onSelectAI={handleSelectAI}
                     onSelectNaive={handleSelectNaive}
